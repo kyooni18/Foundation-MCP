@@ -385,7 +385,7 @@ export function createMcpServer(atoms: AtomService, database: Database): McpServ
     {
       title: "Foundation Memory Policy",
       description: "A conservative workflow for searching and writing durable memories.",
-      argsSchema: z.object({ namespace: z.string().default("default") })
+      argsSchema: { namespace: z.string().default("default") }
     },
     ({ namespace }: { namespace: string }) => ({
       messages: [{
