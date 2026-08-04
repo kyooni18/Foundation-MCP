@@ -57,7 +57,10 @@ export function loadConfig(): Config {
 
   return {
     transport,
-    host: process.env.HOST ?? "127.0.0.1",
+    // HTTP servers in containers must listen on all container interfaces so
+    // Docker port publishing and reverse proxies can reach them. Stdio mode
+    // does not open a listener, but keeps the loopback default for clarity.
+    host: process.env.HOST ?? (transport === "http" ? "0.0.0.0" : "127.0.0.1"),
     port: integer("PORT", 8787),
     mcpPath: process.env.MCP_PATH ?? "/mcp",
     allowedHosts,
