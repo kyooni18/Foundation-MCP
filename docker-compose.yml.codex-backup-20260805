@@ -1,10 +1,6 @@
 services:
   db:
     image: pgvector/pgvector:pg16
-    ports:
-      - "5432:5432"
-    networks:
-      - main
     restart: unless-stopped
     environment:
       POSTGRES_DB: foundation
@@ -17,6 +13,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+    network_mode: host
 
   foundation-mcp:
     build: .
@@ -32,8 +29,7 @@ services:
       - "host.docker.internal:host-gateway"
     ports:
       - "8787:8787"
-    networks:
-      - main
+    network_mode: host
 volumes:
   foundation_data:
 
