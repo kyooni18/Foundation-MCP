@@ -80,7 +80,6 @@ export async function serveHTTP(config: Config, atoms: AtomService, database: Da
   app.post(config.mcpPath, async (req: Request, res: Response) => {
     const server = createMcpServer(atoms, database);
     const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: undefined,
       enableJsonResponse: true
     });
     res.on("close", () => {
