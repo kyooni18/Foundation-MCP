@@ -190,13 +190,63 @@ export class Database {
 
       await client.query(
         `
+        CREATE TABLE IF NOT EXISTS oauth_clients (
+          client_id TEXT PRIMARY KEY,
+          client_name TEXT NOT NULL,
+          redirect_uris TEXT[] NOT NULL,
+          grant_types TEXT[] NOT NULL DEFAULT ARRAY['authorization_code','refresh_token']::TEXT[],
+          response_types TEXT[] NOT NULL DEFAULT ARRAY['code']::TEXT[],
+          token_endpoint_auth_method TEXT NOT NULL DEFAULT 'none',
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          CONSTRAINT oauth_clients_auth_method_check CHECK (token_endpoint_auth_method = 'none')
+        )
+        `
+      );
+
+      await client.query(
+        `
+        CREATE TABLE IF NOT EXISTS oauth_authorization_codes (
+          code_hash CHAR(64) PRIMARY KEY,
+          client_id TEXT NOT NULL REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
+          redirect_uri TEXT NOT NULL,
+          code_challenge TEXT NOT NULL,
+          scopes TEXT[] NOT NULL,
+          resource TEXT NOT NULL,
+          expires_at TIMESTAMPTZ NOT NULL,
+          used_at TIMESTAMPTZ,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        `
+      );
+      await client.query("CREATE INDEX IF NOT EXISTS oauth_authorization_codes_expiry_idx ON oauth_authorization_codes (expires_at)");
+
+      await client.query(
+        `
+        CREATE TABLE IF NOT EXISTS oauth_tokens (
+          token_hash CHAR(64) PRIMARY KEY,
+          token_type TEXT NOT NULL,
+          client_id TEXT NOT NULL REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
+          scopes TEXT[] NOT NULL,
+          resource TEXT NOT NULL,
+          expires_at TIMESTAMPTZ NOT NULL,
+          revoked_at TIMESTAMPTZ,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          CONSTRAINT oauth_tokens_type_check CHECK (token_type IN ('access','refresh'))
+        )
+        `
+      );
+      await client.query("CREATE INDEX IF NOT EXISTS oauth_tokens_client_idx ON oauth_tokens (client_id, token_type)");
+      await client.query("CREATE INDEX IF NOT EXISTS oauth_tokens_expiry_idx ON oauth_tokens (expires_at)");
+
+      await client.query(
+        `
         CREATE TABLE IF NOT EXISTS foundation_schema (
           version INTEGER PRIMARY KEY,
           applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
         `
       );
-      await client.query("INSERT INTO foundation_schema (version) VALUES (1) ON CONFLICT DO NOTHING");
+      await client.query("INSERT INTO foundation_schema (version) VALUES (1), (2) ON CONFLICT DO NOTHING");
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK");

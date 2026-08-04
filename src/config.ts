@@ -25,6 +25,18 @@ function choice<T extends string>(name: string, fallback: T, choices: readonly T
   return value;
 }
 
+function publicURL(value: string | undefined): string | null {
+  const raw = value?.trim();
+  if (!raw) return null;
+  const parsed = new URL(raw);
+  if (parsed.protocol !== "https:") throw new Error("PUBLIC_BASE_URL must use https");
+  if (parsed.pathname !== "/") throw new Error("PUBLIC_BASE_URL must be an origin without a path");
+  parsed.pathname = "";
+  parsed.search = "";
+  parsed.hash = "";
+  return parsed.toString().replace(/\/$/, "");
+}
+
 export interface Config {
   transport: TransportMode;
   host: string;
@@ -44,22 +56,40 @@ export interface Config {
   ollamaBaseURL: string;
   autoMigrate: boolean;
   enableAudit: boolean;
+  publicBaseURL: string | null;
+  oauthEnabled: boolean;
+  oauthLoginPassword: string | null;
+  oauthAllowRegistration: boolean;
+  oauthAccessTokenTTLSeconds: number;
+  oauthRefreshTokenTTLSeconds: number;
 }
 
 export function loadConfig(): Config {
   const transport = choice("MCP_TRANSPORT", "stdio", ["stdio", "http"] as const);
   const embeddingProvider = choice("EMBEDDING_PROVIDER", "none", ["openai", "ollama", "none"] as const);
   const embeddingDimensions = safeIndexDimension(integer("EMBEDDING_DIMENSIONS", 1536));
-  const allowedHosts = (process.env.ALLOWED_HOSTS ?? "localhost,127.0.0.1")
+  const resolvedPublicURL = publicURL(process.env.PUBLIC_BASE_URL);
+  const defaultHosts = ["localhost", "127.0.0.1"];
+  if (resolvedPublicURL) defaultHosts.unshift(new URL(resolvedPublicURL).hostname.toLowerCase());
+  const allowedHosts = (process.env.ALLOWED_HOSTS ?? defaultHosts.join(","))
     .split(",")
     .map((value: string) => value.trim().toLowerCase())
     .filter(Boolean);
+  const oauthEnabled = boolean("OAUTH_ENABLED", false);
+  const oauthLoginPassword = process.env.OAUTH_LOGIN_PASSWORD?.trim() || null;
+
+  if (oauthEnabled && transport !== "http") throw new Error("OAUTH_ENABLED requires MCP_TRANSPORT=http");
+  if (oauthEnabled && !resolvedPublicURL) throw new Error("OAUTH_ENABLED requires PUBLIC_BASE_URL=https://...");
+  if (oauthEnabled && !oauthLoginPassword) throw new Error("OAUTH_ENABLED requires OAUTH_LOGIN_PASSWORD");
+  const oauthAccessTokenTTLSeconds = integer("OAUTH_ACCESS_TOKEN_TTL_SECONDS", 3_600);
+  const oauthRefreshTokenTTLSeconds = integer("OAUTH_REFRESH_TOKEN_TTL_SECONDS", 2_592_000);
+  if (oauthAccessTokenTTLSeconds < 60) throw new Error("OAUTH_ACCESS_TOKEN_TTL_SECONDS must be at least 60");
+  if (oauthRefreshTokenTTLSeconds < oauthAccessTokenTTLSeconds) {
+    throw new Error("OAUTH_REFRESH_TOKEN_TTL_SECONDS must be at least the access token TTL");
+  }
 
   return {
     transport,
-    // HTTP servers in containers must listen on all container interfaces so
-    // Docker port publishing and reverse proxies can reach them. Stdio mode
-    // does not open a listener, but keeps the loopback default for clarity.
     host: process.env.HOST ?? (transport === "http" ? "0.0.0.0" : "127.0.0.1"),
     port: integer("PORT", 8787),
     mcpPath: process.env.MCP_PATH ?? "/mcp",
@@ -76,6 +106,12 @@ export function loadConfig(): Config {
     openAIBaseURL: (process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1").replace(/\/$/, ""),
     ollamaBaseURL: (process.env.OLLAMA_BASE_URL ?? "http://127.0.0.1:11434").replace(/\/$/, ""),
     autoMigrate: boolean("AUTO_MIGRATE", true),
-    enableAudit: boolean("ENABLE_AUDIT", true)
+    enableAudit: boolean("ENABLE_AUDIT", true),
+    publicBaseURL: resolvedPublicURL,
+    oauthEnabled,
+    oauthLoginPassword,
+    oauthAllowRegistration: boolean("OAUTH_ALLOW_DYNAMIC_REGISTRATION", true),
+    oauthAccessTokenTTLSeconds,
+    oauthRefreshTokenTTLSeconds
   };
 }

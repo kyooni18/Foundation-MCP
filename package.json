@@ -1,6 +1,6 @@
 {
   "name": "@kyooni18/foundation-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Atom-first long-term memory server over Model Context Protocol",
   "type": "module",
   "private": false,
