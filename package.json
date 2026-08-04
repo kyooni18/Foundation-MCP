@@ -27,7 +27,7 @@
     "check": "npm run typecheck && npm test"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@modelcontextprotocol/sdk": "1.30.0",
     "express": "^5.0.0",
     "pg": "^8.0.0",
     "zod": "^4.0.0"
