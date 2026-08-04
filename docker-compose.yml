@@ -36,6 +36,10 @@ services:
       - main
 volumes:
   foundation_data:
+    # Keep PostgreSQL data outside the container lifecycle. `docker compose down`
+    # does not remove this named volume unless `--volumes` is explicitly used.
+    # Reuse the existing data volume created by the original Compose project.
+    name: foundation-mcp_foundation_data
 
 networks:
   main:

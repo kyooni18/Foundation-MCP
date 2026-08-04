@@ -56,7 +56,7 @@ curl http://127.0.0.1:8787/health
 
 The MCP endpoint is `http://127.0.0.1:8787/mcp`. For remote deployment, set `ALLOWED_HOSTS` to the public hostname and terminate TLS at a reverse proxy.
 
-The default Compose file does not publish PostgreSQL. Data is retained in the `foundation_data` named volume.
+The default Compose file does not publish PostgreSQL. Data is retained in the explicitly named `foundation-mcp_foundation_data` volume, so `docker compose down` preserves the database; do not add `--volumes` when stopping the stack. Point-in-time Atom exports are stored in `atoms-export-2026-08-05.json` and `atoms-export-2026-08-05-final.json`.
 
 ## Run locally over stdio
 
