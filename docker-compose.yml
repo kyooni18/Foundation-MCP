@@ -11,7 +11,7 @@ services:
       POSTGRES_USER: foundation
       POSTGRES_PASSWORD: foundation
     volumes:
-      - foundation_data:/var/lib/postgresql/data
+      - ./data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U foundation -d foundation"]
       interval: 5s
@@ -34,12 +34,5 @@ services:
       - "8787:8787"
     networks:
       - main
-volumes:
-  foundation_data:
-    # Keep PostgreSQL data outside the container lifecycle. `docker compose down`
-    # does not remove this named volume unless `--volumes` is explicitly used.
-    # Reuse the existing data volume created by the original Compose project.
-    name: foundation-mcp_foundation_data
-
 networks:
   main:

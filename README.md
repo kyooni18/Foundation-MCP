@@ -77,7 +77,7 @@ curl http://127.0.0.1:8787/health
 
 Use a strong `POSTGRES_PASSWORD` and matching `DATABASE_URL` for a new deployment. The entrypoint also rewrites the old Compose hostname `db` to `127.0.0.1` so an existing `.env` can be used safely with the single-container image. Stop it with `container stop foundation-mcp`; do not delete the volume unless the data is intentionally disposable.
 
-The default Compose file does not publish PostgreSQL. Data is retained in the explicitly named `foundation-mcp_foundation_data` volume, so `docker compose down` preserves the database; do not add `--volumes` when stopping the stack. Point-in-time Atom exports are stored in `atoms-export-2026-08-05.json` and `atoms-export-2026-08-05-final.json`.
+The default Compose file does not publish PostgreSQL. Database files are stored in the local `./data` directory, which is ignored by Git. `docker compose down` preserves that directory; do not delete it when stopping the stack. Point-in-time Atom exports are stored in `atoms-export-2026-08-05.json` and `atoms-export-2026-08-05-final.json`.
 
 ## Run locally over stdio
 
