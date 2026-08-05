@@ -66,6 +66,7 @@ container build -t foundation-mcp:local .
 container volume create foundation-mcp-data
 container run -d --name foundation-mcp \
   --env-file .env \
+  -e HOST=:: \
   -e DATABASE_URL=postgresql://foundation:foundation@127.0.0.1:5432/foundation \
   -p 8787:8787 \
   -v foundation-mcp-data:/var/lib/postgresql/data \

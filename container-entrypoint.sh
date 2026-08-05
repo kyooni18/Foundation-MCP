@@ -40,6 +40,7 @@ WHERE EXISTS (SELECT FROM pg_roles WHERE rolname = :'app_user')\gexec
 SQL
 su postgres -s /bin/bash -c "createdb --owner=\"$POSTGRES_USER\" \"$POSTGRES_DB\"" 2>/dev/null || true
 su postgres -s /bin/bash -c "psql --set ON_ERROR_STOP=1 --username=postgres --dbname=\"$POSTGRES_DB\" -c 'CREATE EXTENSION IF NOT EXISTS vector; CREATE EXTENSION IF NOT EXISTS pgcrypto; CREATE EXTENSION IF NOT EXISTS pg_trgm;'"
+su postgres -s /bin/bash -c "psql --set ON_ERROR_STOP=1 --username=postgres --dbname=\"$POSTGRES_DB\" -c 'ALTER FUNCTION IF EXISTS public.foundation_atoms_search_document() OWNER TO foundation;'" 2>/dev/null || true
 
 # A Compose .env commonly still contains DATABASE_URL=...@db. In the single
 # container image, transparently redirect that legacy value to local Postgres.
