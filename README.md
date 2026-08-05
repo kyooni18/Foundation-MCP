@@ -56,6 +56,26 @@ curl http://127.0.0.1:8787/health
 
 The MCP endpoint is `http://127.0.0.1:8787/mcp`. For remote deployment, set `ALLOWED_HOSTS` to the public hostname and terminate TLS at a reverse proxy.
 
+## Run as one Apple Container
+
+The image below contains both PostgreSQL/pgvector and the MCP server. PostgreSQL data lives in a container volume and is initialized on the first start:
+
+```bash
+container machine start
+container build -t foundation-mcp:local .
+container volume create foundation-mcp-data
+container run -d --name foundation-mcp \
+  --env-file .env \
+  -e DATABASE_URL=postgresql://foundation:foundation@127.0.0.1:5432/foundation \
+  -p 8787:8787 \
+  -v foundation-mcp-data:/var/lib/postgresql/data \
+  foundation-mcp:local
+container logs -f foundation-mcp
+curl http://127.0.0.1:8787/health
+```
+
+Use a strong `POSTGRES_PASSWORD` and matching `DATABASE_URL` for a new deployment. The entrypoint also rewrites the old Compose hostname `db` to `127.0.0.1` so an existing `.env` can be used safely with the single-container image. Stop it with `container stop foundation-mcp`; do not delete the volume unless the data is intentionally disposable.
+
 The default Compose file does not publish PostgreSQL. Data is retained in the explicitly named `foundation-mcp_foundation_data` volume, so `docker compose down` preserves the database; do not add `--volumes` when stopping the stack. Point-in-time Atom exports are stored in `atoms-export-2026-08-05.json` and `atoms-export-2026-08-05-final.json`.
 
 ## Run locally over stdio

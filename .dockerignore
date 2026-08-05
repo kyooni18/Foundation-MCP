@@ -1,8 +1,12 @@
+.env
+.git
+.gitignore
 node_modules
 dist
-.git
 .github
-.env
 *.zip
 *.bundle
 npm-debug.log*
+tests
+atoms-export-*.json
+docker-compose*.yml
