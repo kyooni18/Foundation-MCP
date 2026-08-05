@@ -13,6 +13,7 @@ import type {
 import {
   clamp,
   compactRecord,
+  boundedRecord,
   normalizeContent,
   normalizeNamespace,
   normalizeOptionalText,
@@ -66,6 +67,27 @@ function searchFromRow(row: QueryResultRow): SearchResult {
   };
 }
 
+export function modelAtom(atom: AtomRow | SearchResult, includeMetadata = false): Record<string, unknown> {
+  const compact: Record<string, unknown> = {
+    id: atom.id,
+    namespace: atom.namespace,
+    kind: atom.kind,
+    content: atom.content,
+    summary: atom.summary,
+    tags: atom.tags
+  };
+  if ("score" in atom) {
+    compact.score = atom.score;
+    compact.semantic_score = atom.semantic_score;
+    compact.lexical_score = atom.lexical_score;
+  }
+  if (includeMetadata) {
+    compact.metadata = atom.metadata;
+    compact.source = atom.source;
+  }
+  return compact;
+}
+
 function relationFromRow(row: QueryResultRow): RelationRow {
   return {
     id: String(row.id),
@@ -92,6 +114,8 @@ export class AtomService {
     const namespace = normalizeNamespace(input.namespace ?? "default");
     const hash = sha256(content);
     const tags = normalizeTags(input.tags);
+    const metadata = boundedRecord(input.metadata, "metadata");
+    const source = boundedRecord(input.source, "source");
     const summary = normalizeOptionalText(input.summary, "summary", 2_000) ?? null;
     const expiresAt = parseOptionalDate(input.expiresAt, "expiresAt") ?? null;
     const embedding = await this.embeddings.embed(content);
@@ -110,7 +134,7 @@ export class AtomService {
         [
           namespace, content, content, hash, summary, input.kind ?? "fact",
           clamp(input.importance ?? 0.5), clamp(input.confidence ?? 1), tags,
-          JSON.stringify(input.metadata ?? {}), JSON.stringify(input.source ?? {}), expiresAt,
+          JSON.stringify(metadata), JSON.stringify(source), expiresAt,
           this.vectorOrNull(embedding), embedding?.provider ?? null, embedding?.model ?? null, embedding?.dimensions ?? null
         ]
       );
@@ -150,7 +174,7 @@ export class AtomService {
       [
         namespace, content, content, hash, summary, input.kind ?? "fact",
         clamp(input.importance ?? 0.5), clamp(input.confidence ?? 1), tags,
-        JSON.stringify(input.metadata ?? {}), JSON.stringify(input.source ?? {}), expiresAt,
+        JSON.stringify(metadata), JSON.stringify(source), expiresAt,
         this.vectorOrNull(embedding), embedding?.provider ?? null, embedding?.model ?? null, embedding?.dimensions ?? null,
         replace
       ]
@@ -191,6 +215,8 @@ export class AtomService {
     const summary = input.summary === undefined
       ? current.summary
       : normalizeOptionalText(input.summary, "summary", 2_000);
+    const metadata = input.metadata === undefined ? current.metadata : boundedRecord(input.metadata, "metadata");
+    const source = input.source === undefined ? current.source : boundedRecord(input.source, "source");
     const contentChanged = content !== current.normalized_content;
     const embedding = contentChanged ? await this.embeddings.embed(content) : null;
     const expiresAt = parseOptionalDate(input.expiresAt, "expiresAt");
@@ -225,8 +251,8 @@ export class AtomService {
         clamp(input.importance ?? current.importance),
         clamp(input.confidence ?? current.confidence),
         input.tags === undefined ? current.tags : normalizeTags(input.tags),
-        JSON.stringify(input.metadata ?? current.metadata),
-        JSON.stringify(input.source ?? current.source),
+        JSON.stringify(metadata),
+        JSON.stringify(source),
         expiresAt === undefined ? current.expires_at : expiresAt,
         contentChanged,
         this.vectorOrNull(embedding), embedding?.provider ?? null, embedding?.model ?? null, embedding?.dimensions ?? null,
@@ -445,6 +471,7 @@ export class AtomService {
     const relationType = normalizeContent(input.relationType).toLocaleLowerCase("und").replace(/\s+/g, "_");
     if (!relationType) throw new Error("relationType must not be empty");
     if (relationType.length > 100) throw new Error("relationType exceeds 100 characters");
+    const metadata = boundedRecord(input.metadata, "relation metadata");
     const result = await this.database.query(
       `
       INSERT INTO atom_relations (from_atom_id, to_atom_id, relation_type, weight, metadata)
@@ -455,7 +482,7 @@ export class AtomService {
         updated_at = NOW()
       RETURNING *
       `,
-      [input.fromAtomID, input.toAtomID, relationType, clamp(input.weight ?? 1), JSON.stringify(input.metadata ?? {})]
+      [input.fromAtomID, input.toAtomID, relationType, clamp(input.weight ?? 1), JSON.stringify(metadata)]
     );
     await this.database.audit("link", input.fromAtomID, { to: input.toAtomID, relationType });
     return relationFromRow(result.rows[0]!);
@@ -542,11 +569,11 @@ export class AtomService {
       const content = requestedContent ?? target.content;
       const tags = normalizeTags(atoms.flatMap(atom => atom.tags));
       const sourceAtoms = atoms.filter(atom => atom.id !== target.id);
-      const metadata = Object.assign({}, ...sourceAtoms.map(atom => atom.metadata), target.metadata);
-      const source = {
+      const metadata = boundedRecord(Object.assign({}, ...sourceAtoms.map(atom => atom.metadata), target.metadata), "metadata");
+      const source = boundedRecord({
         ...target.source,
         merged_from: sourceAtoms.map(atom => ({ id: atom.id, source: atom.source }))
-      };
+      }, "source");
       const importance = Math.max(...atoms.map(atom => atom.importance));
       const confidence = Math.max(...atoms.map(atom => atom.confidence));
       const contentChanged = requestedContent !== undefined && content !== target.normalized_content;
@@ -580,7 +607,7 @@ export class AtomService {
     return { atom: merged, mergedAtomIDs: sourceIDs };
   }
 
-  async context(input: AtomSearchInput & { maxCharacters?: number; includeMetadata?: boolean }): Promise<Record<string, unknown>> {
+  async context(input: AtomSearchInput & { maxCharacters?: number; includeAtoms?: boolean; includeMetadata?: boolean }): Promise<Record<string, unknown>> {
     const search = await this.search(input);
     const maxCharacters = Math.max(256, Math.min(input.maxCharacters ?? 8_000, 50_000));
     let used = 0;
@@ -593,14 +620,19 @@ export class AtomService {
       selected.push(atom);
       used += line.length + 1;
     }
-    return {
+    const response: Record<string, unknown> = {
       query: search.query,
       effectiveMode: search.effectiveMode,
       context: lines.join("\n"),
       atomCount: selected.length,
-      characters: used,
-      atoms: input.includeMetadata ? selected : selected.map(({ metadata: _metadata, source: _source, ...atom }) => atom)
+      characters: used
     };
+    // Keep includeMetadata as an implicit opt-in for backwards compatibility;
+    // the default response remains context-only.
+    if (input.includeAtoms || input.includeMetadata) {
+      response.atoms = selected.map(atom => modelAtom(atom, input.includeMetadata));
+    }
+    return response;
   }
 
   async reembed(options: { namespace?: string; limit?: number; onlyMissing?: boolean }): Promise<Record<string, unknown>> {

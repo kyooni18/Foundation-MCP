@@ -15,7 +15,8 @@ The original Foundation stored compact text/vector records and later grew source
 - directed typed relations between atoms
 - hybrid ranking across vector similarity, PostgreSQL full-text search, trigram similarity, importance, confidence, and recency
 - duplicate merge with relation rewiring
-- context packing for model prompts
+- context packing for model prompts without duplicating the packed text by default
+- compact model-facing search results with bounded metadata and provenance records
 - OpenAI-compatible, Ollama, and no-embedding modes
 - local stdio and remote stateless Streamable HTTP transports
 - full-access and read-only bearer keys with Host allow-listing for HTTP deployments
@@ -31,7 +32,7 @@ The original Foundation stored compact text/vector records and later grew source
 | `atom_update` | Patch an atom with optional version guarding and re-embed changed content | Yes |
 | `atom_search` | Hybrid filtered search | No |
 | `atom_find_similar` | Find duplicates or related atoms from an existing atom | No |
-| `atom_context` | Pack search results into bounded context | No |
+| `atom_context` | Pack search results into bounded context; full atom records are opt-in with `includeAtoms` | No |
 | `atom_list` | Browse atoms | No |
 | `atom_delete` | Archive, soft-delete, or hard-delete | Yes, destructive |
 | `atom_restore` | Restore an atom | Yes |
@@ -42,6 +43,10 @@ The original Foundation stored compact text/vector records and later grew source
 | `atom_history` | Read per-atom audit events | No |
 | `atom_reembed` | Backfill embeddings | Yes |
 | `atom_stats` | Aggregate statistics | No |
+
+All model-facing atom responses omit operational fields and metadata by default, including create, bulk-create, get, update, search, similar, list, delete, restore, link, neighbors, merge, and history. Use `includeDetails: true` only when those fields are needed. `atom_context` uses `includeAtoms: true` for optional compact records. Metadata and provenance are limited to compact JSON records to prevent accidental prompt bloat.
+
+Low-frequency maintenance tools (`foundation_health`, `atom_list`, `atom_reembed`, `atom_history`, and `atom_stats`) are hidden from the default MCP tool catalog. Set `EXPOSE_MAINTENANCE_TOOLS=true` for an administrative client; the HTTP health endpoint remains available independently.
 
 The tools include MCP annotations such as `readOnlyHint` and `destructiveHint`, allowing OpenAI clients to filter tools and apply approval policies.
 

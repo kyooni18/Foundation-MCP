@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
+import { modelAtom } from "./atom-service.js";
 import type { AtomService } from "./atom-service.js";
 import type { Database } from "./db.js";
 import { ATOM_KINDS } from "./types.js";
@@ -8,6 +9,7 @@ import { jsonText } from "./utils.js";
 const metadataSchema = z.record(z.string(), z.unknown());
 const atomKindSchema = z.enum(ATOM_KINDS);
 const atomStatusSchema = z.enum(["active", "archived", "deleted"]);
+const detailsField = z.boolean().default(false).describe("Include internal fields and metadata; disabled by default for compact output");
 
 const createShape = {
   content: z.string().min(1).max(100_000).describe("Atomic statement or compact note to store"),
@@ -42,20 +44,42 @@ const searchShape = {
   lexicalWeight: z.number().min(0).max(1).optional(),
   recencyHalfLifeDays: z.number().min(1).max(3650).default(180)
 };
-const searchSchema = z.object(searchShape);
-
 function result(data: any) {
   return {
-    content: [{ type: "text" as const, text: jsonText(data) }],
-    structuredContent: data
+    // Keep one canonical model-visible representation. Returning the same
+    // payload in content and structuredContent doubles prompt-facing bytes.
+    content: [{ type: "text" as const, text: JSON.stringify(data) }]
   };
 }
 
 function failure(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
   return {
-    content: [{ type: "text" as const, text: `Foundation error: ${message}` }],
+    content: [{ type: "text" as const, text: `Foundation error: ${message.slice(0, 1_000)}` }],
     isError: true
+  };
+}
+
+function registerOptionalTool(server: McpServer, enabled: boolean, name: string, config: any, handler: any): void {
+  if (enabled) server.registerTool(name, config, handler);
+}
+
+function modelRelation(relation: any, includeMetadata = false): Record<string, unknown> {
+  const compact: Record<string, unknown> = {
+    id: relation.id,
+    from_atom_id: relation.from_atom_id,
+    to_atom_id: relation.to_atom_id,
+    relation_type: relation.relation_type,
+    weight: relation.weight
+  };
+  if (includeMetadata) compact.metadata = relation.metadata;
+  return compact;
+}
+
+function modelNeighbor(item: any, includeMetadata = false): Record<string, unknown> {
+  return {
+    relation: modelRelation(item.relation, includeMetadata),
+    neighbor: modelAtom(item.neighbor, includeMetadata)
   };
 }
 
@@ -76,8 +100,9 @@ export function createMcpServer(atoms: AtomService, database: Database): McpServ
     { name: "foundation-mcp", version: "0.1.0" },
     { capabilities: { logging: {} } }
   );
+  const exposeMaintenanceTools = database.config.exposeMaintenanceTools;
 
-  server.registerTool(
+  registerOptionalTool(server, exposeMaintenanceTools,
     "foundation_health",
     {
       title: "Foundation Health",
@@ -101,10 +126,18 @@ export function createMcpServer(atoms: AtomService, database: Database): McpServ
     {
       title: "Create Atom",
       description: "Store one durable, self-contained memory atom. Deduplicates normalized content within a namespace.",
-      inputSchema: createSchema,
+      inputSchema: createSchema.extend({ includeDetails: detailsField }),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
     },
-    tool(async input => atoms.create(input))
+    tool(async input => {
+      const { includeDetails, ...createInput } = input;
+      const result = await atoms.create(createInput);
+      return includeDetails ? result : {
+        created: result.created,
+        deduplicated: result.deduplicated,
+        atom: modelAtom(result.atom)
+      };
+    })
   );
 
   server.registerTool(
@@ -112,10 +145,17 @@ export function createMcpServer(atoms: AtomService, database: Database): McpServ
     {
       title: "Create Atoms in Bulk",
       description: "Store up to 100 atoms. Each item reports success or failure independently.",
-      inputSchema: z.object({ items: z.array(createSchema).min(1).max(100) }),
+      inputSchema: z.object({ items: z.array(createSchema).min(1).max(100), includeDetails: detailsField }),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
     },
-    tool(async ({ items }) => atoms.bulkCreate(items))
+    tool(async ({ items, includeDetails }) => {
+      const result = await atoms.bulkCreate(items);
+      return includeDetails ? result : {
+        results: result.results.map((item: any) => item.ok && item.atom
+          ? { index: item.index, ok: true, created: item.created, deduplicated: item.deduplicated, atom: modelAtom(item.atom) }
+          : item)
+      };
+    })
   );
 
   server.registerTool(
@@ -123,10 +163,13 @@ export function createMcpServer(atoms: AtomService, database: Database): McpServ
     {
       title: "Get Atom",
       description: "Read a single atom by UUID.",
-      inputSchema: z.object({ id: z.string().uuid() }),
+      inputSchema: z.object({ id: z.string().uuid(), includeDetails: detailsField }),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
     },
-    tool(async ({ id }) => ({ atom: await atoms.get(id) }))
+    tool(async ({ id, includeDetails }) => {
+      const atom = await atoms.get(id);
+      return { atom: includeDetails ? atom : modelAtom(atom) };
+    })
   );
 
   server.registerTool(
@@ -146,11 +189,16 @@ export function createMcpServer(atoms: AtomService, database: Database): McpServ
         tags: z.array(z.string().max(100)).max(100).optional(),
         metadata: metadataSchema.optional(),
         source: metadataSchema.optional(),
-        expiresAt: z.string().datetime({ offset: true }).nullable().optional()
+        expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
+        includeDetails: detailsField
       }),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
     },
-    tool(async input => ({ atom: await atoms.update(input) }))
+    tool(async input => {
+      const { includeDetails, ...updateInput } = input;
+      const atom = await atoms.update(updateInput);
+      return { atom: includeDetails ? atom : modelAtom(atom) };
+    })
   );
 
   server.registerTool(
@@ -158,10 +206,18 @@ export function createMcpServer(atoms: AtomService, database: Database): McpServ
     {
       title: "Search Atoms",
       description: "Search atoms with hybrid semantic, full-text, trigram, importance, confidence, and recency ranking.",
-      inputSchema: searchSchema,
+      inputSchema: z.object({
+        ...searchShape,
+        includeDetails: z.boolean().default(false).describe("Include internal fields and metadata; disabled by default for compact model output")
+      }),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
     },
-    tool(async input => atoms.search(input))
+    tool(async input => {
+      const search = await atoms.search(input);
+      return input.includeDetails
+        ? search
+        : { ...search, results: search.results.map(atom => modelAtom(atom)) };
+    })
   );
 
   server.registerTool(
@@ -172,11 +228,19 @@ export function createMcpServer(atoms: AtomService, database: Database): McpServ
       inputSchema: z.object({
         id: z.string().uuid(),
         limit: z.number().int().min(1).max(50).default(10),
-        mode: z.enum(["hybrid", "semantic", "lexical"]).default("hybrid")
+        mode: z.enum(["hybrid", "semantic", "lexical"]).default("hybrid"),
+        includeDetails: detailsField
       }),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
     },
-    tool(async ({ id, limit, mode }) => atoms.similar(id, { limit, mode }))
+    tool(async ({ id, limit, mode, includeDetails }) => {
+      const result = await atoms.similar(id, { limit, mode });
+      return includeDetails ? result : {
+        atom: modelAtom((result as any).atom),
+        effectiveMode: result.effectiveMode,
+        results: (result.results as any[]).map((atom: any) => modelAtom(atom))
+      };
+    })
   );
 
   server.registerTool(
@@ -187,14 +251,15 @@ export function createMcpServer(atoms: AtomService, database: Database): McpServ
       inputSchema: z.object({
         ...searchShape,
         maxCharacters: z.number().int().min(256).max(50_000).default(8_000),
-        includeMetadata: z.boolean().default(false)
+        includeAtoms: z.boolean().default(false).describe("Include matching atom records in addition to the packed context; disabled by default to avoid duplication"),
+        includeMetadata: z.boolean().default(false).describe("Include metadata and provenance when includeAtoms is enabled")
       }),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
     },
     tool(async input => atoms.context(input))
   );
 
-  server.registerTool(
+  registerOptionalTool(server, exposeMaintenanceTools,
     "atom_list",
     {
       title: "List Atoms",
@@ -206,11 +271,16 @@ export function createMcpServer(atoms: AtomService, database: Database): McpServ
         tags: z.array(z.string().max(100)).max(100).optional(),
         limit: z.number().int().min(1).max(200).default(50),
         offset: z.number().int().min(0).default(0),
-        sort: z.enum(["created", "updated", "importance"]).default("updated")
+        sort: z.enum(["created", "updated", "importance"]).default("updated"),
+        includeDetails: detailsField
       }),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
     },
-    tool(async input => atoms.list(input))
+    tool(async input => {
+      const { includeDetails, ...listInput } = input;
+      const result = await atoms.list(listInput);
+      return includeDetails ? result : { ...result, atoms: result.atoms.map(atom => modelAtom(atom)) };
+    })
   );
 
   server.registerTool(
@@ -221,11 +291,15 @@ export function createMcpServer(atoms: AtomService, database: Database): McpServ
       inputSchema: z.object({
         id: z.string().uuid(),
         mode: z.enum(["archive", "delete", "hard"]).default("archive"),
-        confirmation: z.string().optional()
+        confirmation: z.string().optional(),
+        includeDetails: detailsField
       }),
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false }
     },
-    tool(async ({ id, mode, confirmation }) => atoms.remove(id, mode, confirmation))
+    tool(async ({ id, mode, confirmation, includeDetails }) => {
+      const result = await atoms.remove(id, mode, confirmation);
+      return includeDetails || !(result as any).atom ? result : { atom: modelAtom((result as any).atom) };
+    })
   );
 
   server.registerTool(
@@ -233,10 +307,13 @@ export function createMcpServer(atoms: AtomService, database: Database): McpServ
     {
       title: "Restore Atom",
       description: "Restore an archived or soft-deleted atom to active status.",
-      inputSchema: z.object({ id: z.string().uuid() }),
+      inputSchema: z.object({ id: z.string().uuid(), includeDetails: detailsField }),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
     },
-    tool(async ({ id }) => ({ atom: await atoms.restore(id) }))
+    tool(async ({ id, includeDetails }) => {
+      const atom = await atoms.restore(id);
+      return { atom: includeDetails ? atom : modelAtom(atom) };
+    })
   );
 
   server.registerTool(
@@ -249,11 +326,16 @@ export function createMcpServer(atoms: AtomService, database: Database): McpServ
         toAtomID: z.string().uuid(),
         relationType: z.string().min(1).max(100),
         weight: z.number().min(0).max(1).default(1),
-        metadata: metadataSchema.default({})
+        metadata: metadataSchema.default({}),
+        includeDetails: detailsField
       }),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
     },
-    tool(async input => ({ relation: await atoms.link(input) }))
+    tool(async input => {
+      const { includeDetails, ...linkInput } = input;
+      const relation = await atoms.link(linkInput);
+      return { relation: includeDetails ? relation : modelRelation(relation) };
+    })
   );
 
   server.registerTool(
@@ -280,12 +362,13 @@ export function createMcpServer(atoms: AtomService, database: Database): McpServ
         id: z.string().uuid(),
         direction: z.enum(["outgoing", "incoming", "both"]).default("both"),
         relationTypes: z.array(z.string()).optional(),
-        limit: z.number().int().min(1).max(200).default(50)
+        limit: z.number().int().min(1).max(200).default(50),
+        includeDetails: detailsField
       }),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
     },
-    tool(async ({ id, direction, relationTypes, limit }) => ({
-      neighbors: await atoms.neighbors(id, direction, relationTypes, limit)
+    tool(async ({ id, direction, relationTypes, limit, includeDetails }) => ({
+      neighbors: (await atoms.neighbors(id, direction, relationTypes, limit)).map(item => includeDetails ? item : modelNeighbor(item))
     }))
   );
 
@@ -298,14 +381,19 @@ export function createMcpServer(atoms: AtomService, database: Database): McpServ
         targetAtomID: z.string().uuid(),
         sourceAtomIDs: z.array(z.string().uuid()).min(1).max(100),
         content: z.string().min(1).max(100_000).optional(),
-        summary: z.string().max(2_000).nullable().optional()
+        summary: z.string().max(2_000).nullable().optional(),
+        includeDetails: detailsField
       }),
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false }
     },
-    tool(async input => atoms.merge(input))
+    tool(async input => {
+      const { includeDetails, ...mergeInput } = input;
+      const result = await atoms.merge(mergeInput);
+      return includeDetails ? result : { atom: modelAtom(result.atom), mergedAtomIDs: result.mergedAtomIDs };
+    })
   );
 
-  server.registerTool(
+  registerOptionalTool(server, exposeMaintenanceTools,
     "atom_reembed",
     {
       title: "Re-embed Atoms",
@@ -313,25 +401,34 @@ export function createMcpServer(atoms: AtomService, database: Database): McpServ
       inputSchema: z.object({
         namespace: z.string().optional(),
         limit: z.number().int().min(1).max(1000).default(100),
-        onlyMissing: z.boolean().default(true)
+        onlyMissing: z.boolean().default(true),
+        includeDetails: detailsField
       }),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true }
     },
-    tool(async input => atoms.reembed(input))
+    tool(async ({ includeDetails, ...input }) => {
+      const result = await atoms.reembed(input);
+      return includeDetails
+        ? result
+        : { scanned: result.scanned, updated: result.updated, failed: Array.isArray(result.failures) ? result.failures.length : 0 };
+    })
   );
 
-  server.registerTool(
+  registerOptionalTool(server, exposeMaintenanceTools,
     "atom_history",
     {
       title: "Atom History",
       description: "Read audit events for one atom, including creation, updates, links, merges, and removal.",
-      inputSchema: z.object({ id: z.string().uuid(), limit: z.number().int().min(1).max(200).default(50) }),
+      inputSchema: z.object({ id: z.string().uuid(), limit: z.number().int().min(1).max(200).default(50), includeDetails: detailsField }),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
     },
-    tool(async ({ id, limit }) => ({ events: await atoms.history(id, limit) }))
+    tool(async ({ id, limit, includeDetails }) => {
+      const events = await atoms.history(id, limit);
+      return { events: includeDetails ? events : events.map(({ details: _details, ...event }) => event) };
+    })
   );
 
-  server.registerTool(
+  registerOptionalTool(server, exposeMaintenanceTools,
     "atom_stats",
     {
       title: "Atom Statistics",

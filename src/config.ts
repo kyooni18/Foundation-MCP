@@ -62,6 +62,7 @@ export interface Config {
   oauthAllowRegistration: boolean;
   oauthAccessTokenTTLSeconds: number;
   oauthRefreshTokenTTLSeconds: number;
+  exposeMaintenanceTools: boolean;
 }
 
 export function loadConfig(): Config {
@@ -112,6 +113,7 @@ export function loadConfig(): Config {
     oauthLoginPassword,
     oauthAllowRegistration: boolean("OAUTH_ALLOW_DYNAMIC_REGISTRATION", true),
     oauthAccessTokenTTLSeconds,
-    oauthRefreshTokenTTLSeconds
+    oauthRefreshTokenTTLSeconds,
+    exposeMaintenanceTools: boolean("EXPOSE_MAINTENANCE_TOOLS", false)
   };
 }

@@ -19,6 +19,7 @@ services:
       retries: 20
 
   foundation-mcp:
+    image: kyooni18/foundation-mcp:latest
     build: .
     restart: unless-stopped
     depends_on:

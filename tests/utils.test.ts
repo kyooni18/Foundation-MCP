@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeContent, normalizeTags, secureTokenEqual, sha256, vectorLiteral } from "../src/utils.js";
+import { boundedRecord, normalizeContent, normalizeTags, secureTokenEqual, sha256, vectorLiteral } from "../src/utils.js";
 
 describe("normalizeContent", () => {
   it("normalizes Unicode, whitespace, and line endings", () => {
@@ -28,5 +28,15 @@ describe("secureTokenEqual", () => {
     expect(secureTokenEqual("secret", "secret")).toBe(true);
     expect(secureTokenEqual("secret", "secrex")).toBe(false);
     expect(secureTokenEqual("secret", "secret-longer")).toBe(false);
+  });
+});
+
+describe("boundedRecord", () => {
+  it("accepts compact provenance records", () => {
+    expect(boundedRecord({ type: "decision", id: "abc" }, "source")).toEqual({ type: "decision", id: "abc" });
+  });
+
+  it("rejects oversized strings", () => {
+    expect(() => boundedRecord({ detail: "x".repeat(1_001) }, "metadata")).toThrow(/metadata/);
   });
 });

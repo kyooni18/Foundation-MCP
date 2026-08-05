@@ -77,6 +77,39 @@ export function compactRecord(value: Record<string, unknown> | undefined): Recor
   return value ?? {};
 }
 
+const MAX_RECORD_BYTES = 4_096;
+const MAX_RECORD_DEPTH = 4;
+const MAX_RECORD_KEYS = 50;
+const MAX_RECORD_ITEMS = 50;
+const MAX_RECORD_STRING = 1_000;
+
+export function boundedRecord(value: Record<string, unknown> | undefined, field: string): Record<string, unknown> {
+  const walk = (item: unknown, depth: number): unknown => {
+    if (typeof item === "string") {
+      if (item.length > MAX_RECORD_STRING) throw new Error(`${field} contains a string exceeding ${MAX_RECORD_STRING} characters`);
+      return item;
+    }
+    if (item === null || typeof item === "number" || typeof item === "boolean") return item;
+    if (depth >= MAX_RECORD_DEPTH) throw new Error(`${field} exceeds maximum nesting depth of ${MAX_RECORD_DEPTH}`);
+    if (Array.isArray(item)) {
+      if (item.length > MAX_RECORD_ITEMS) throw new Error(`${field} contains an array exceeding ${MAX_RECORD_ITEMS} items`);
+      return item.map(entry => walk(entry, depth + 1));
+    }
+    if (typeof item === "object") {
+      const entries = Object.entries(item as Record<string, unknown>);
+      if (entries.length > MAX_RECORD_KEYS) throw new Error(`${field} exceeds ${MAX_RECORD_KEYS} keys at one level`);
+      return Object.fromEntries(entries.map(([key, entry]) => [key, walk(entry, depth + 1)]));
+    }
+    throw new Error(`${field} contains an unsupported value`);
+  };
+
+  const result = walk(value ?? {}, 0) as Record<string, unknown>;
+  if (Buffer.byteLength(JSON.stringify(result), "utf8") > MAX_RECORD_BYTES) {
+    throw new Error(`${field} exceeds ${MAX_RECORD_BYTES} bytes`);
+  }
+  return result;
+}
+
 export function safeIndexDimension(value: number): number {
   if (!Number.isInteger(value) || value < 1 || value > 16_000) {
     throw new Error("EMBEDDING_DIMENSIONS must be an integer between 1 and 16000");
