@@ -69,7 +69,7 @@ export function loadConfig(): Config {
   const embeddingProvider = choice("EMBEDDING_PROVIDER", "none", ["openai", "ollama", "none"] as const);
   const embeddingDimensions = safeIndexDimension(integer("EMBEDDING_DIMENSIONS", 1536));
   const resolvedPublicURL = publicURL(process.env.PUBLIC_BASE_URL);
-  const defaultHosts = ["localhost", "127.0.0.1"];
+  const defaultHosts = ["localhost", "127.0.0.1", "::1"];
   if (resolvedPublicURL) defaultHosts.unshift(new URL(resolvedPublicURL).hostname.toLowerCase());
   const allowedHosts = (process.env.ALLOWED_HOSTS ?? defaultHosts.join(","))
     .split(",")
