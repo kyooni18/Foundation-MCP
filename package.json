@@ -1,6 +1,6 @@
 {
   "name": "@kyooni18/foundation-mcp",
-  "version": "0.2.0",
+  "version": "0.3.3",
   "description": "Atom-first long-term memory server over Model Context Protocol",
   "type": "module",
   "private": false,
@@ -8,7 +8,8 @@
     "node": ">=20"
   },
   "bin": {
-    "foundation-mcp": "dist/src/index.js"
+    "foundation-mcp": "dist/src/index.js",
+    "foundation-admin": "dist/src/admin.js"
   },
   "files": [
     "dist",
@@ -24,7 +25,11 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "check": "npm run typecheck && npm test"
+    "check": "npm run typecheck && npm test",
+    "admin": "node dist/src/admin.js",
+    "migrate:legacy": "node dist/src/legacy-import.js",
+    "benchmark:context": "node dist/src/context-benchmark.js",
+    "benchmark:retrieval": "node dist/src/retrieval-benchmark.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",

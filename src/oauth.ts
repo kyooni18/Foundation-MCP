@@ -26,7 +26,7 @@ function authorizationInput(source: Record<string, unknown>): AuthorizationReque
   };
 }
 
-function authorizationPage(input: AuthorizationRequest, clientName: string, scopes: OAuthScope[], error = ""): string {
+function authorizationPage(input: AuthorizationRequest, clientName: string, scopes: OAuthScope[], allowedNamespaces: string[], error = ""): string {
   const hidden = Object.entries({
     response_type: input.responseType,
     client_id: input.clientID,
@@ -48,6 +48,7 @@ function authorizationPage(input: AuthorizationRequest, clientName: string, scop
 body{font-family:ui-sans-serif,system-ui,sans-serif;background:#f5f5f5;color:#171717;margin:0;display:grid;place-items:center;min-height:100vh}.card{background:white;border:1px solid #ddd;border-radius:16px;padding:28px;width:min(440px,calc(100vw - 40px));box-shadow:0 12px 40px #0001}h1{margin:0 0 8px;font-size:24px}p{line-height:1.5}.scopes{padding-left:20px}.error{color:#b42318;background:#fee4e2;padding:10px;border-radius:8px}input[type=password]{width:100%;box-sizing:border-box;padding:12px;border:1px solid #bbb;border-radius:9px;margin:8px 0 16px}.actions{display:flex;gap:10px}.actions button{flex:1;padding:11px;border-radius:9px;border:0;font-weight:650;cursor:pointer}.approve{background:#111;color:#fff}.deny{background:#eee;color:#222}</style></head>
 <body><main class="card"><h1>Authorize Foundation</h1><p><strong>${htmlEscape(clientName)}</strong> is requesting access to your private memory server.</p>
 ${error ? `<p class="error">${htmlEscape(error)}</p>` : ""}<ul class="scopes">${scopes.map(scope => `<li>${htmlEscape(scopeLabels[scope])}</li>`).join("")}</ul>
+<p><strong>Namespaces:</strong> ${allowedNamespaces.map(htmlEscape).join(", ")}</p>
 <form method="post" action="/authorize">${hidden}<label for="password">Foundation approval password</label><input id="password" name="password" type="password" autocomplete="current-password" required>
 <div class="actions"><button class="deny" name="decision" value="deny" formnovalidate>Deny</button><button class="approve" name="decision" value="approve">Approve</button></div></form></main></body></html>`;
 }
@@ -57,13 +58,7 @@ export function createOAuthRouter(service: OAuthService): Router {
   const failedApprovals = new Map<string, { count: number; resetAt: number }>();
   router.use(express.urlencoded({ extended: false, limit: "32kb" }));
 
-  const approvalClientKey = (req: Request): string => {
-    const cloudflareIP = req.headers["cf-connecting-ip"];
-    if (typeof cloudflareIP === "string" && cloudflareIP) return cloudflareIP;
-    const forwarded = req.headers["x-forwarded-for"];
-    if (typeof forwarded === "string" && forwarded) return forwarded.split(",", 1)[0]!.trim();
-    return "unknown";
-  };
+  const approvalClientKey = (req: Request): string => req.socket.remoteAddress ?? "unknown";
   const secureAuthorizationPage = (res: Response): void => {
     res.setHeader("Cache-Control", "no-store");
     res.setHeader("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'");
@@ -88,7 +83,7 @@ export function createOAuthRouter(service: OAuthService): Router {
     try {
       const { client, scopes } = await service.validateAuthorizationRequest(input);
       secureAuthorizationPage(res);
-      res.type("html").send(authorizationPage(input, client.client_name, scopes));
+      res.type("html").send(authorizationPage(input, client.client_name, scopes, client.allowed_namespaces));
     } catch (error) {
       res.status(400).type("text").send(error instanceof Error ? error.message : String(error));
     }
@@ -115,7 +110,7 @@ export function createOAuthRouter(service: OAuthService): Router {
         const current = attempts && attempts.resetAt > now ? attempts : { count: 0, resetAt: now + 10 * 60_000 };
         failedApprovals.set(clientKey, { count: current.count + 1, resetAt: current.resetAt });
         secureAuthorizationPage(res);
-        res.status(401).type("html").send(authorizationPage(input, client.client_name, scopes, "Incorrect approval password"));
+        res.status(401).type("html").send(authorizationPage(input, client.client_name, scopes, client.allowed_namespaces, "Incorrect approval password"));
         return;
       }
       failedApprovals.delete(clientKey);

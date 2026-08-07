@@ -43,6 +43,8 @@ export interface SearchResult extends AtomRow {
   semantic_score: number;
   lexical_score: number;
   recency_score: number;
+  access_score: number;
+  feedback_score: number;
   score: number;
 }
 

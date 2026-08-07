@@ -1,39 +1,47 @@
 services:
   db:
     image: pgvector/pgvector:pg16
-    ports:
-      - "5432:5432"
     networks:
       - main
     restart: unless-stopped
     environment:
-      POSTGRES_DB: foundation
-      POSTGRES_USER: foundation
-      POSTGRES_PASSWORD: foundation
+      POSTGRES_DB: ${POSTGRES_DB:-foundation}
+      POSTGRES_USER: ${POSTGRES_USER:-foundation}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     volumes:
       - ./data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U foundation -d foundation"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-foundation} -d ${POSTGRES_DB:-foundation}"]
       interval: 5s
       timeout: 5s
       retries: 20
 
   foundation-mcp:
     image: kyooni18/foundation-mcp:latest
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.app
     restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     depends_on:
       db:
         condition: service_healthy
     env_file: .env
     environment:
       MCP_TRANSPORT: http
-      DATABASE_URL: postgresql://foundation:foundation@db:5432/foundation
+      DATABASE_URL: postgresql://${POSTGRES_USER:-foundation}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:-foundation}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
       - "8787:8787"
     networks:
       - main
+
 networks:
   main:

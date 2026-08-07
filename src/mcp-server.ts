@@ -1,8 +1,10 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
-import { modelAtom } from "./atom-service.js";
+import { modelAtom, STANDARD_RELATION_TYPES } from "./atom-service.js";
 import type { AtomService } from "./atom-service.js";
 import type { Database } from "./db.js";
+import type { MaintenanceService } from "./maintenance.js";
+import type { SmartMemoryService } from "./smart-memory.js";
 import { ATOM_KINDS } from "./types.js";
 import { jsonText } from "./utils.js";
 
@@ -95,12 +97,48 @@ function tool(
   };
 }
 
-export function createMcpServer(atoms: AtomService, database: Database): McpServer {
+export function createMcpServer(atoms: AtomService, database: Database, maintenance?: MaintenanceService, smartMemory?: SmartMemoryService): McpServer {
   const server = new McpServer(
-    { name: "foundation-mcp", version: "0.1.0" },
+    { name: "foundation-mcp", version: "0.3.3" },
     { capabilities: { logging: {} } }
   );
   const exposeMaintenanceTools = database.config.exposeMaintenanceTools;
+
+  if (smartMemory) {
+    server.registerTool(
+      "memory_recall",
+      {
+        title: "Recall Memory",
+        description: "Recall and pack relevant durable memories. This path never invokes the smart LLM.",
+        inputSchema: z.object({
+          query: z.string().min(1).max(20_000),
+          namespace: z.string().optional(),
+          limit: z.number().int().min(1).max(50).default(8),
+          maxCharacters: z.number().int().min(256).max(50_000).default(8_000),
+          maxTokens: z.number().int().min(64).max(20_000).default(2_000)
+        }),
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
+      },
+      tool(input => smartMemory.recall(input))
+    );
+
+    server.registerTool(
+      "memory_remember",
+      {
+        title: "Remember Memory",
+        description: "Store durable memory with deterministic preprocessing first and at most one smart-model call only for ambiguous writes.",
+        inputSchema: z.object({
+          text: z.string().min(1).max(100_000),
+          namespace: z.string().optional(),
+          tags: z.array(z.string().max(100)).max(100).default([]),
+          source: metadataSchema.default({}),
+          store: z.boolean().default(true).describe("Set false to inspect the planned write without mutating memory")
+        }),
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
+      },
+      tool(input => smartMemory.remember(input))
+    );
+  }
 
   registerOptionalTool(server, exposeMaintenanceTools,
     "foundation_health",
@@ -110,15 +148,18 @@ export function createMcpServer(atoms: AtomService, database: Database): McpServ
       inputSchema: z.object({}),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
     },
-    tool(async () => ({
-      ok: true,
-      database: await database.health(),
-      embedding: {
-        provider: database.config.embeddingProvider,
-        model: database.config.embeddingModel,
-        dimensions: database.config.embeddingDimensions
-      }
-    }))
+    tool(async () => {
+      const maintenanceState = maintenance ? await maintenance.status(1) : null;
+      return {
+        ok: true,
+        database: await database.health(),
+        embedding: atoms.embeddings.stats(),
+        smartModel: smartMemory?.stats() ?? { enabled: false },
+        maintenance: maintenanceState
+          ? { enabled: true, running: maintenanceState.running, queued: maintenanceState.queued }
+          : { enabled: false }
+      };
+    })
   );
 
   server.registerTool(
@@ -145,11 +186,11 @@ export function createMcpServer(atoms: AtomService, database: Database): McpServ
     {
       title: "Create Atoms in Bulk",
       description: "Store up to 100 atoms. Each item reports success or failure independently.",
-      inputSchema: z.object({ items: z.array(createSchema).min(1).max(100), includeDetails: detailsField }),
+      inputSchema: z.object({ items: z.array(createSchema).min(1).max(100), atomic: z.boolean().default(false).describe("Rollback the entire batch if any item fails"), includeDetails: detailsField }),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
     },
-    tool(async ({ items, includeDetails }) => {
-      const result = await atoms.bulkCreate(items);
+    tool(async ({ items, atomic, includeDetails }) => {
+      const result = await atoms.bulkCreate(items, { atomic });
       return includeDetails ? result : {
         results: result.results.map((item: any) => item.ok && item.atom
           ? { index: item.index, ok: true, created: item.created, deduplicated: item.deduplicated, atom: modelAtom(item.atom) }
@@ -247,10 +288,11 @@ export function createMcpServer(atoms: AtomService, database: Database): McpServ
     "atom_context",
     {
       title: "Build Memory Context",
-      description: "Search atoms and pack the best matches into a compact context block bounded by character count.",
+      description: "Search, diversify, optionally expand relations, and pack the best memory context within character/token budgets.",
       inputSchema: z.object({
         ...searchShape,
         maxCharacters: z.number().int().min(256).max(50_000).default(8_000),
+        maxTokens: z.number().int().min(64).max(20_000).optional().describe("Optional approximate token budget in addition to maxCharacters"),
         includeAtoms: z.boolean().default(false).describe("Include matching atom records in addition to the packed context; disabled by default to avoid duplication"),
         includeMetadata: z.boolean().default(false).describe("Include metadata and provenance when includeAtoms is enabled")
       }),
@@ -320,7 +362,7 @@ export function createMcpServer(atoms: AtomService, database: Database): McpServ
     "atom_link",
     {
       title: "Link Atoms",
-      description: "Create or update a directed typed relation between two atoms.",
+      description: `Create or update a directed typed relation between two atoms. Standard relation types include ${STANDARD_RELATION_TYPES.join(", ")}; custom types remain supported.`,
       inputSchema: z.object({
         fromAtomID: z.string().uuid(),
         toAtomID: z.string().uuid(),
@@ -393,6 +435,79 @@ export function createMcpServer(atoms: AtomService, database: Database): McpServ
     })
   );
 
+  server.registerTool(
+    "atom_feedback",
+    {
+      title: "Record Atom Feedback",
+      description: "Record whether a retrieved memory was useful, neutral, or misleading. Feedback is a bounded ranking signal and does not mutate the atom itself.",
+      inputSchema: z.object({
+        atomID: z.string().uuid(),
+        signal: z.union([z.literal(-1), z.literal(0), z.literal(1)]),
+        reason: z.string().max(500).optional(),
+        source: z.string().max(100).optional()
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
+    },
+    tool(async input => atoms.feedback(input))
+  );
+
+  server.registerTool(
+    "atom_supersede",
+    {
+      title: "Supersede Atom",
+      description: "Create a replacement atom, link it with a supersedes relation, and optionally archive the older atom atomically.",
+      inputSchema: z.object({
+        oldAtomID: z.string().uuid(),
+        replacement: createSchema,
+        archiveOld: z.boolean().default(true),
+        includeDetails: detailsField
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
+    },
+    tool(async ({ includeDetails, ...input }) => {
+      const result = await atoms.supersede(input);
+      return includeDetails ? result : {
+        oldAtom: modelAtom(result.oldAtom),
+        replacementAtom: modelAtom(result.replacementAtom),
+        relation: modelRelation(result.relation)
+      };
+    })
+  );
+
+  registerOptionalTool(server, exposeMaintenanceTools,
+    "atom_consolidate",
+    {
+      title: "Find and Link Near-Duplicate Atoms",
+      description: "Scan a bounded active-memory window for strong near-duplicates and add duplicate_of suggestion relations without automatically merging or deleting data.",
+      inputSchema: z.object({
+        namespace: z.string().optional(),
+        limit: z.number().int().min(1).max(2000).default(100),
+        lexicalThreshold: z.number().min(0).max(1).default(0.9),
+        semanticThreshold: z.number().min(0).max(1).default(0.965),
+        includeDetails: detailsField
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+    },
+    tool(async ({ includeDetails, ...input }) => {
+      const result = await atoms.consolidate(input);
+      return includeDetails ? result : { scannedPairs: result.scannedPairs, linked: result.linked };
+    })
+  );
+
+  registerOptionalTool(server, exposeMaintenanceTools,
+    "atom_lifecycle_suggestions",
+    {
+      title: "Atom Lifecycle Suggestions",
+      description: "Suggest bounded review, promotion, or decay candidates using age, access, importance, and explicit feedback. This never changes atoms automatically.",
+      inputSchema: z.object({
+        namespace: z.string().optional(),
+        limit: z.number().int().min(1).max(500).default(100)
+      }),
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+    },
+    tool(async input => atoms.lifecycleSuggestions(input))
+  );
+
   registerOptionalTool(server, exposeMaintenanceTools,
     "atom_reembed",
     {
@@ -439,6 +554,47 @@ export function createMcpServer(atoms: AtomService, database: Database): McpServ
     tool(async ({ namespace }) => atoms.stats(namespace))
   );
 
+  registerOptionalTool(server, exposeMaintenanceTools && Boolean(maintenance),
+    "foundation_maintenance_run",
+    {
+      title: "Run Foundation Maintenance",
+      description: "Run a bounded maintenance job for OAuth cleanup, stale embeddings, duplicate suggestions, expiration archival, or all enabled maintenance steps.",
+      inputSchema: z.object({
+        jobType: z.enum(["oauth_cleanup", "reembed", "consolidate", "archive_expired", "full"]).default("full")
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true }
+    },
+    tool(async ({ jobType }) => maintenance!.enqueue(jobType, { requestedBy: "mcp" }))
+  );
+
+  registerOptionalTool(server, exposeMaintenanceTools && Boolean(maintenance),
+    "foundation_maintenance_status",
+    {
+      title: "Foundation Maintenance Status",
+      description: "Read recent maintenance job status.",
+      inputSchema: z.object({ limit: z.number().int().min(1).max(100).default(20) }),
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+    },
+    tool(async ({ limit }) => maintenance!.status(limit))
+  );
+
+  registerOptionalTool(server, exposeMaintenanceTools,
+    "foundation_diagnostics",
+    {
+      title: "Foundation Diagnostics",
+      description: "Read schema, pool, index, embedding, and maintenance diagnostics without exposing atom contents.",
+      inputSchema: z.object({}),
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+    },
+    tool(async () => ({
+      database: await database.health(),
+      indexes: await database.indexHealth(),
+      embedding: atoms.embeddings.stats(),
+      smartModel: smartMemory?.stats() ?? { enabled: false },
+      maintenance: maintenance ? await maintenance.status(10) : { enabled: false }
+    }))
+  );
+
   server.registerResource(
     "foundation-about",
     "foundation://about",
@@ -469,11 +625,11 @@ export function createMcpServer(atoms: AtomService, database: Database): McpServ
     "foundation://stats",
     {
       title: "Foundation Statistics",
-      description: "Current aggregate atom statistics.",
+      description: "Current aggregate atom statistics plus smart-model usage counters when smart memory is available.",
       mimeType: "application/json"
     },
     async (uri: URL) => ({
-      contents: [{ uri: uri.href, mimeType: "application/json", text: jsonText(await atoms.stats()) }]
+      contents: [{ uri: uri.href, mimeType: "application/json", text: jsonText({ ...(await atoms.stats()), smartModel: smartMemory?.stats() ?? { enabled: false } }) }]
     })
   );
 

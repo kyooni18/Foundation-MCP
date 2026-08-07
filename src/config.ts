@@ -1,13 +1,23 @@
 import { safeIndexDimension } from "./utils.js";
+import type { LogLevel } from "./telemetry.js";
 
 export type TransportMode = "stdio" | "http";
 export type EmbeddingProviderName = "openai" | "ollama" | "none";
+export type SmartModelMode = "off" | "auto" | "on";
 
 function integer(name: string, fallback: number): number {
   const value = process.env[name];
   if (!value) return fallback;
   const parsed = Number(value);
   if (!Number.isInteger(parsed)) throw new Error(`${name} must be an integer`);
+  return parsed;
+}
+
+function numberValue(name: string, fallback: number): number {
+  const value = process.env[name];
+  if (!value) return fallback;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) throw new Error(`${name} must be a finite number`);
   return parsed;
 }
 
@@ -25,6 +35,16 @@ function choice<T extends string>(name: string, fallback: T, choices: readonly T
   return value;
 }
 
+
+function smartModelMode(name: string, fallback: SmartModelMode = "auto"): SmartModelMode {
+  const value = process.env[name]?.trim().toLowerCase();
+  if (!value) return fallback;
+  if (value === "auto") return "auto";
+  if (["1", "true", "yes", "on"].includes(value)) return "on";
+  if (["0", "false", "no", "off"].includes(value)) return "off";
+  throw new Error(`${name} must be auto, on/true, or off/false`);
+}
+
 function publicURL(value: string | undefined): string | null {
   const raw = value?.trim();
   if (!raw) return null;
@@ -37,6 +57,24 @@ function publicURL(value: string | undefined): string | null {
   return parsed.toString().replace(/\/$/, "");
 }
 
+function namespacePatterns(name: string, fallback = "*"): string[] {
+  const values = (process.env[name] ?? fallback)
+    .split(",")
+    .map((value: string) => value.trim())
+    .filter(Boolean);
+  if (!values.length) throw new Error(`${name} must contain at least one namespace pattern`);
+  for (const value of values) {
+    if (value === "*") continue;
+    if (value.endsWith("*")) {
+      const prefix = value.slice(0, -1);
+      if (!prefix || prefix.includes("*") || prefix.includes("\n")) throw new Error(`${name} contains an invalid namespace pattern`);
+      continue;
+    }
+    if (value.includes("*") || value.includes("\n")) throw new Error(`${name} contains an invalid namespace pattern`);
+  }
+  return [...new Set<string>(values)];
+}
+
 export interface Config {
   transport: TransportMode;
   host: string;
@@ -45,6 +83,8 @@ export interface Config {
   allowedHosts: string[];
   apiKey: string | null;
   readOnlyAPIKey: string | null;
+  adminNamespaces: string[];
+  readOnlyNamespaces: string[];
   maxRequestBytes: number;
   databaseURL: string;
   databasePoolSize: number;
@@ -54,6 +94,11 @@ export interface Config {
   openAIAPIKey: string | null;
   openAIBaseURL: string;
   ollamaBaseURL: string;
+  embeddingRetryMax: number;
+  embeddingCacheSize: number;
+  embeddingCacheTTLSeconds: number;
+  embeddingBatchSize: number;
+  embeddingConcurrency: number;
   autoMigrate: boolean;
   enableAudit: boolean;
   publicBaseURL: string | null;
@@ -62,7 +107,39 @@ export interface Config {
   oauthAllowRegistration: boolean;
   oauthAccessTokenTTLSeconds: number;
   oauthRefreshTokenTTLSeconds: number;
+  oauthDefaultNamespaces: string[];
   exposeMaintenanceTools: boolean;
+  contextDiversityLambda: number;
+  contextRelationExpansion: boolean;
+  contextRelationLimit: number;
+  contextQueryDecomposition: boolean;
+  adaptiveAccessWeight: number;
+  adaptiveFeedbackWeight: number;
+  logFormat: "text" | "json";
+  logLevel: LogLevel;
+  metricsEnabled: boolean;
+  metricsPath: string;
+  requestRateLimitPerMinute: number;
+  oauthRateLimitPerMinute: number;
+  maintenanceEnabled: boolean;
+  maintenanceIntervalSeconds: number;
+  maintenanceReembedLimit: number;
+  maintenanceConsolidationLimit: number;
+  maintenanceArchiveExpired: boolean;
+  smartModelEnabled: SmartModelMode;
+  smartModel: string;
+  smartModelAPIKey: string | null;
+  smartModelBaseURL: string;
+  smartModelMaxInputCharacters: number;
+  smartModelMaxOutputTokens: number;
+  smartModelLongInputThreshold: number;
+  smartModelAmbiguousLexicalThreshold: number;
+  smartModelDuplicateLexicalThreshold: number;
+  smartModelCacheSize: number;
+  smartModelCacheTTLSeconds: number;
+  smartModelTimeoutMs: number;
+  smartModelDailyCallBudget: number;
+  smartModelDailyInputTokenBudget: number;
 }
 
 export function loadConfig(): Config {
@@ -89,6 +166,13 @@ export function loadConfig(): Config {
     throw new Error("OAUTH_REFRESH_TOKEN_TTL_SECONDS must be at least the access token TTL");
   }
 
+  const contextDiversityLambda = numberValue("CONTEXT_DIVERSITY_LAMBDA", 0.78);
+  if (contextDiversityLambda < 0 || contextDiversityLambda > 1) throw new Error("CONTEXT_DIVERSITY_LAMBDA must be between 0 and 1");
+  const adaptiveAccessWeight = numberValue("ADAPTIVE_ACCESS_WEIGHT", 0.025);
+  const adaptiveFeedbackWeight = numberValue("ADAPTIVE_FEEDBACK_WEIGHT", 0.035);
+  if (adaptiveAccessWeight < 0 || adaptiveAccessWeight > 0.2) throw new Error("ADAPTIVE_ACCESS_WEIGHT must be between 0 and 0.2");
+  if (adaptiveFeedbackWeight < 0 || adaptiveFeedbackWeight > 0.2) throw new Error("ADAPTIVE_FEEDBACK_WEIGHT must be between 0 and 0.2");
+
   return {
     transport,
     host: process.env.HOST ?? (transport === "http" ? "0.0.0.0" : "127.0.0.1"),
@@ -97,6 +181,8 @@ export function loadConfig(): Config {
     allowedHosts,
     apiKey: (process.env.FOUNDATION_ADMIN_KEY ?? process.env.FOUNDATION_API_KEY)?.trim() || null,
     readOnlyAPIKey: process.env.FOUNDATION_READ_ONLY_KEY?.trim() || null,
+    adminNamespaces: namespacePatterns("FOUNDATION_ADMIN_NAMESPACES"),
+    readOnlyNamespaces: namespacePatterns("FOUNDATION_READ_ONLY_NAMESPACES"),
     maxRequestBytes: integer("MAX_REQUEST_BYTES", 1_048_576),
     databaseURL: process.env.DATABASE_URL ?? "postgresql://foundation:foundation@127.0.0.1:5432/foundation",
     databasePoolSize: integer("DATABASE_POOL_SIZE", 10),
@@ -106,6 +192,11 @@ export function loadConfig(): Config {
     openAIAPIKey: process.env.OPENAI_API_KEY?.trim() || null,
     openAIBaseURL: (process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1").replace(/\/$/, ""),
     ollamaBaseURL: (process.env.OLLAMA_BASE_URL ?? "http://127.0.0.1:11434").replace(/\/$/, ""),
+    embeddingRetryMax: Math.max(0, Math.min(integer("EMBEDDING_RETRY_MAX", 3), 10)),
+    embeddingCacheSize: Math.max(0, Math.min(integer("EMBEDDING_CACHE_SIZE", 2_000), 100_000)),
+    embeddingCacheTTLSeconds: Math.max(1, integer("EMBEDDING_CACHE_TTL_SECONDS", 3_600)),
+    embeddingBatchSize: Math.max(1, Math.min(integer("EMBEDDING_BATCH_SIZE", 64), 512)),
+    embeddingConcurrency: Math.max(1, Math.min(integer("EMBEDDING_CONCURRENCY", 4), 32)),
     autoMigrate: boolean("AUTO_MIGRATE", true),
     enableAudit: boolean("ENABLE_AUDIT", true),
     publicBaseURL: resolvedPublicURL,
@@ -114,6 +205,40 @@ export function loadConfig(): Config {
     oauthAllowRegistration: boolean("OAUTH_ALLOW_DYNAMIC_REGISTRATION", true),
     oauthAccessTokenTTLSeconds,
     oauthRefreshTokenTTLSeconds,
-    exposeMaintenanceTools: boolean("EXPOSE_MAINTENANCE_TOOLS", false)
+    oauthDefaultNamespaces: namespacePatterns("OAUTH_DEFAULT_NAMESPACES"),
+    exposeMaintenanceTools: boolean("EXPOSE_MAINTENANCE_TOOLS", false),
+    contextDiversityLambda,
+    contextRelationExpansion: boolean("CONTEXT_RELATION_EXPANSION", true),
+    contextRelationLimit: Math.max(0, Math.min(integer("CONTEXT_RELATION_LIMIT", 2), 10)),
+    contextQueryDecomposition: boolean("CONTEXT_QUERY_DECOMPOSITION", true),
+    adaptiveAccessWeight,
+    adaptiveFeedbackWeight,
+    logFormat: choice("LOG_FORMAT", "text", ["text", "json"] as const),
+    logLevel: choice("LOG_LEVEL", "info", ["debug", "info", "warn", "error"] as const),
+    metricsEnabled: boolean("METRICS_ENABLED", false),
+    metricsPath: process.env.METRICS_PATH?.trim() || "/metrics",
+    requestRateLimitPerMinute: Math.max(0, integer("REQUEST_RATE_LIMIT_PER_MINUTE", 600)),
+    oauthRateLimitPerMinute: Math.max(0, integer("OAUTH_RATE_LIMIT_PER_MINUTE", 60)),
+    maintenanceEnabled: boolean("MAINTENANCE_ENABLED", false),
+    maintenanceIntervalSeconds: Math.max(60, integer("MAINTENANCE_INTERVAL_SECONDS", 3_600)),
+    maintenanceReembedLimit: Math.max(0, Math.min(integer("MAINTENANCE_REEMBED_LIMIT", 100), 5_000)),
+    maintenanceConsolidationLimit: Math.max(0, Math.min(integer("MAINTENANCE_CONSOLIDATION_LIMIT", 100), 5_000)),
+    maintenanceArchiveExpired: boolean("MAINTENANCE_ARCHIVE_EXPIRED", false),
+    // Existing smart-model variables remain compatible. Everything below has
+    // a conservative default so existing .env files do not need any changes.
+    smartModelEnabled: smartModelMode("SMART_MODEL_ENABLED"),
+    smartModel: process.env.SMART_MODEL?.trim() || "gpt-5.6-luna",
+    smartModelAPIKey: (process.env.SMART_MODEL_API_KEY ?? process.env.OPENAI_API_KEY)?.trim() || null,
+    smartModelBaseURL: (process.env.SMART_MODEL_BASE_URL ?? process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1").replace(/\/$/, ""),
+    smartModelMaxInputCharacters: Math.max(500, Math.min(integer("SMART_MODEL_MAX_INPUT_CHARACTERS", 3_200), 20_000)),
+    smartModelMaxOutputTokens: Math.max(100, Math.min(integer("SMART_MODEL_MAX_OUTPUT_TOKENS", 320), 2_000)),
+    smartModelLongInputThreshold: Math.max(300, Math.min(integer("SMART_MODEL_LONG_INPUT_THRESHOLD", 900), 10_000)),
+    smartModelAmbiguousLexicalThreshold: Math.max(0, Math.min(numberValue("SMART_MODEL_AMBIGUOUS_LEXICAL_THRESHOLD", 0.62), 1)),
+    smartModelDuplicateLexicalThreshold: Math.max(0, Math.min(numberValue("SMART_MODEL_DUPLICATE_LEXICAL_THRESHOLD", 0.93), 1)),
+    smartModelCacheSize: Math.max(0, Math.min(integer("SMART_MODEL_CACHE_SIZE", 2_000), 100_000)),
+    smartModelCacheTTLSeconds: Math.max(60, integer("SMART_MODEL_CACHE_TTL_SECONDS", 604_800)),
+    smartModelTimeoutMs: Math.max(1_000, Math.min(integer("SMART_MODEL_TIMEOUT_MS", 15_000), 120_000)),
+    smartModelDailyCallBudget: Math.max(0, integer("SMART_MODEL_DAILY_CALL_BUDGET", 32)),
+    smartModelDailyInputTokenBudget: Math.max(0, integer("SMART_MODEL_DAILY_INPUT_TOKEN_BUDGET", 24_000))
   };
 }

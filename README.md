@@ -1,38 +1,127 @@
 # Foundation MCP
 
-Foundation MCP is an atom-first long-term memory server for MCP clients. It is a clean rewrite of `kyooni18/Foundation`: the Obsidian vault synchronizer, browser control panel, legacy HTTP API, and legacy Python server are intentionally absent.
+Foundation MCP is an atom-first long-term memory server for MCP clients. Version 0.3 keeps the existing MCP, HTTP, API-key, OAuth, stdio, and atom-storage mechanisms while adding retrieval planning, adaptive memory signals, safer maintenance, additive schema migrations, namespace authorization, observability, and operator tooling.
 
-The server exposes durable knowledge as MCP tools, resources, and a memory-policy prompt. PostgreSQL and pgvector provide storage; semantic embeddings are optional. With embeddings disabled, full-text and trigram search continue to work.
+The core `atoms` table remains the same. The v0.3 database changes are intentionally small: three namespace-grant columns are added to the existing OAuth tables, and two auxiliary tables store explicit retrieval feedback and maintenance-job state. Existing atom IDs, relations, events, embeddings, namespaces, and API behavior remain usable.
 
-## What changed
+## Compatibility
 
-The original Foundation stored compact text/vector records and later grew source graphs and vault synchronization. This rewrite narrows the product around atoms and strengthens that model:
+Existing MCP tools remain available with their existing names and existing arguments. New behavior is additive:
 
-- namespaces for personal, project, and workspace isolation
-- NFC and whitespace normalization with per-namespace SHA-256 deduplication
-- kinds, tags, summary, importance, confidence, expiration, structured metadata, and provenance
-- active, archived, and deleted states with version counters, optimistic updates, and audit events
-- directed typed relations between atoms
-- hybrid ranking across vector similarity, PostgreSQL full-text search, trigram similarity, importance, confidence, and recency
-- duplicate merge with relation rewiring
-- context packing for model prompts without duplicating the packed text by default
-- compact model-facing search results with bounded metadata and provenance records
-- OpenAI-compatible, Ollama, and no-embedding modes
-- local stdio and remote stateless Streamable HTTP transports
-- full-access and read-only bearer keys with Host allow-listing for HTTP deployments
+- `atom_bulk_create` accepts an optional `atomic` flag; the default remains independent per-item success/failure.
+- `atom_context` accepts an optional `maxTokens` budget in addition to the existing character budget.
+- Existing relation-name normalization is unchanged; standard relation types are additive conventions and custom relation types remain supported exactly as before.
+- `FOUNDATION_API_KEY` remains a compatibility alias for `FOUNDATION_ADMIN_KEY`.
+- `/health` remains available and now aliases the readiness check.
+- OAuth authorization code + PKCE, dynamic client registration, refresh tokens, and revocation remain intact.
+
+New optional tools include `atom_feedback`, `atom_supersede`, `atom_consolidate`, `atom_lifecycle_suggestions`, `foundation_maintenance_run`, `foundation_maintenance_status`, and `foundation_diagnostics`. Low-frequency administrative tools remain hidden unless `EXPOSE_MAINTENANCE_TOOLS=true`.
+
+## What v0.3 improves
+
+### Retrieval and context quality
+
+Hybrid search now uses a two-stage candidate/reranking pipeline. Semantic and lexical candidate sets are combined with reciprocal-rank evidence, then reranked using semantic relevance, lexical relevance, importance, confidence, recency, a bounded access signal, and explicit usefulness feedback.
+
+`atom_context` over-fetches candidates, optionally decomposes long multi-part queries, removes redundant results using MMR-style diversity selection, optionally expands strong same-namespace relations, and packs the final context against character and approximate token budgets. Selected memories update the existing `access_count` and `last_accessed_at` fields. Explicit positive/neutral/negative retrieval feedback is kept separately so simple exposure is not confused with usefulness.
+
+The adaptive weights are intentionally small. Frequently returned memories therefore receive only a modest boost instead of becoming permanently dominant.
+
+### Embedding efficiency
+
+Exact duplicates are checked before a single-item embedding request. Bulk embedding requests deduplicate identical texts, batch provider requests, use bounded concurrency, cache query/content embeddings in memory, retry transient failures with backoff, and preserve the legacy partial-success behavior by falling back to per-item embedding when a batch fails.
+
+Re-embedding can detect atoms whose provider, model, or dimensions no longer match the configured embedding model, making model migrations resumable in bounded batches.
+
+### Smart-memory model cost control
+
+The smart-memory path is now deterministic-first. Existing `.env` files remain valid and do not require any new variables. Existing `SMART_MODEL_ENABLED`, `SMART_MODEL`, `SMART_MODEL_API_KEY`, and `SMART_MODEL_BASE_URL` settings are still recognized. New cost-control settings are optional overrides only.
+
+`memory_recall` never invokes the smart model. `memory_remember` first performs normalization, deterministic list/sentence splitting, heuristic kind/importance classification, and a lexical-only duplicate/change candidate lookup. Exact/strong duplicates and ordinary single-atom writes therefore complete without a generative-model request. The smart model is reserved for genuinely ambiguous existing-memory matches or long prose that cannot be split safely by simple structure. One `memory_remember` operation can make at most one smart-model request.
+
+Repeated ambiguous decisions are cached in memory using the normalized text plus candidate atom IDs and versions. A candidate version change naturally invalidates the cache. Smart requests use compact candidate records, capped input text, low reasoning effort, structured JSON output, `store: false`, and a bounded output budget. If the model is unavailable, disabled, times out, exceeds a budget, or returns invalid output, Foundation falls back to deterministic storage instead of failing the memory write.
+
+Without adding anything to `.env`, the built-in limits are:
+
+- maximum smart-model calls per UTC day: **32**
+- estimated smart-model input budget per UTC day: **24,000 tokens**
+- maximum text sent from one memory request: **3,200 characters**
+- maximum model output: **320 tokens**
+- decision cache TTL: **7 days**
+- smart-model timeout: **15 seconds**
+
+Set either daily budget to `0` only when an unlimited budget is explicitly desired. The limits reset in process at the UTC day boundary; restarting the server also resets the in-process counters. They are a usage guard, not a billing-provider hard limit.
+
+`foundation://stats`, `foundation_health`, and `foundation_diagnostics` expose smart-model calls, cache hits, deterministic/read/budget avoided calls, failures, input/output token counts, and current daily budget consumption. These counters contain no memory contents.
+
+Optional overrides, if tuning is needed later:
+
+```dotenv
+SMART_MODEL_MAX_INPUT_CHARACTERS=3200
+SMART_MODEL_MAX_OUTPUT_TOKENS=320
+SMART_MODEL_LONG_INPUT_THRESHOLD=900
+SMART_MODEL_AMBIGUOUS_LEXICAL_THRESHOLD=0.62
+SMART_MODEL_DUPLICATE_LEXICAL_THRESHOLD=0.93
+SMART_MODEL_CACHE_SIZE=2000
+SMART_MODEL_CACHE_TTL_SECONDS=604800
+SMART_MODEL_TIMEOUT_MS=15000
+SMART_MODEL_DAILY_CALL_BUDGET=32
+SMART_MODEL_DAILY_INPUT_TOKEN_BUDGET=24000
+```
+
+### Memory maintenance
+
+Foundation now defines common relation conventions such as `supports`, `contradicts`, `supersedes`, `derived_from`, `duplicate_of`, and `related_to` while continuing to preserve custom relation names with the same normalization behavior as earlier releases.
+
+`atom_supersede` creates a replacement, links it to the older memory, and optionally archives the older atom in one transaction. `atom_consolidate` conservatively scans a bounded recent window for strong near-duplicates and creates `duplicate_of` suggestion relations; it does not automatically merge or delete data. `atom_lifecycle_suggestions` identifies possible review, promotion, or decay candidates from age, access, importance, and feedback without mutating them.
+
+Maintenance jobs are persisted in `maintenance_jobs`. MCP-triggered maintenance returns a queued job ID immediately instead of blocking the request. Re-embedding, duplicate suggestion scans, OAuth cleanup, and optional expiration archival can also run on a low-frequency internal schedule.
+
+### Consistency
+
+Atom mutations and their audit events now share the same PostgreSQL transaction. This prevents successful writes from being separated from failed audit writes. Bulk creation additionally offers an opt-in all-or-nothing transaction while retaining the old independent-item default.
+
+### Namespace authorization
+
+Namespaces are still logical atom partitions, but they can now also be constrained per credential. Admin keys, read-only keys, and OAuth clients can each receive exact namespace grants or trailing-prefix grants such as `project:*`.
+
+The default grant is `*`, so existing deployments keep their current behavior unless an administrator opts into restrictions. Authorization checks include both source and destination namespaces for moves and all involved atoms for relations and merges. Global maintenance requires an all-namespace credential.
+
+OAuth client namespace grants can be changed with:
+
+```bash
+npm run build
+node dist/src/admin.js oauth-namespaces <client-id> 'personal,project:calcite,work:*'
+```
+
+New authorization approvals display the namespaces assigned to the OAuth client. Existing OAuth protocols and endpoints are not replaced.
+
+### Observability
+
+Foundation can emit structured JSON or human-readable logs with request IDs. It records bounded in-process metrics for HTTP requests, PostgreSQL queries/transactions, searches, embedding requests/cache hits, and maintenance jobs. Set `METRICS_ENABLED=true` to expose Prometheus text at `/metrics`; when an admin API key is configured, that endpoint requires the admin bearer key.
+
+HTTP probes are separated without removing the old endpoint:
+
+- `/live` checks that the process is alive.
+- `/ready` checks database readiness and schema state.
+- `/health` remains a compatibility alias for `/ready`.
+
+`foundation_diagnostics` and `foundation-admin diagnostics` report schema, pool, index, embedding, smart-model usage, and maintenance status without returning atom contents.
 
 ## Tools
 
 | Tool | Purpose | Mutation |
 |---|---|---|
-| `foundation_health` | Database and embedding status | No |
-| `atom_create` | Create or deduplicate one atom | Yes |
-| `atom_bulk_create` | Create up to 100 atoms | Yes |
+| `memory_recall` | Recall and pack memories without invoking the smart LLM | No |
+| `memory_remember` | Deterministic-first durable memory write; at most one smart-model fallback call | Yes |
+| `foundation_health` | Database, schema, embedding, smart-model, and maintenance status | No |
+| `atom_create` | Create or exactly deduplicate one atom | Yes |
+| `atom_bulk_create` | Create up to 100 atoms; optional atomic mode | Yes |
 | `atom_get` | Read an atom by UUID | No |
-| `atom_update` | Patch an atom with optional version guarding and re-embed changed content | Yes |
-| `atom_search` | Hybrid filtered search | No |
-| `atom_find_similar` | Find duplicates or related atoms from an existing atom | No |
-| `atom_context` | Pack search results into bounded context; full atom records are opt-in with `includeAtoms` | No |
+| `atom_update` | Patch an atom with optional version guarding | Yes |
+| `atom_search` | Hybrid filtered retrieval | No |
+| `atom_find_similar` | Find related atoms from an existing atom | No |
+| `atom_context` | Diversify and pack bounded model context | No |
 | `atom_list` | Browse atoms | No |
 | `atom_delete` | Archive, soft-delete, or hard-delete | Yes, destructive |
 | `atom_restore` | Restore an atom | Yes |
@@ -40,91 +129,120 @@ The original Foundation stored compact text/vector records and later grew source
 | `atom_unlink` | Remove a typed relation | Yes |
 | `atom_neighbors` | Traverse relations | No |
 | `atom_merge` | Merge duplicates and rewire relations | Yes, destructive |
+| `atom_feedback` | Record bounded retrieval usefulness feedback | Yes |
+| `atom_supersede` | Replace and link a changed memory atomically | Yes |
+| `atom_consolidate` | Add conservative near-duplicate suggestions | Yes, non-destructive |
+| `atom_lifecycle_suggestions` | Suggest review/promotion/decay candidates | No |
 | `atom_history` | Read per-atom audit events | No |
-| `atom_reembed` | Backfill embeddings | Yes |
-| `atom_stats` | Aggregate statistics | No |
+| `atom_reembed` | Backfill or migrate embeddings | Yes |
+| `atom_stats` | Aggregate memory statistics | No |
+| `foundation_maintenance_run` | Queue a bounded maintenance job | Yes |
+| `foundation_maintenance_status` | Read recent job state | No |
+| `foundation_diagnostics` | Read operational diagnostics | No |
 
-All model-facing atom responses omit operational fields and metadata by default, including create, bulk-create, get, update, search, similar, list, delete, restore, link, neighbors, merge, and history. Use `includeDetails: true` only when those fields are needed. `atom_context` uses `includeAtoms: true` for optional compact records. Metadata and provenance are limited to compact JSON records to prevent accidental prompt bloat.
+Model-facing responses remain compact by default. Existing `includeDetails` and `includeAtoms` options continue to expose richer records only when requested.
 
-Low-frequency maintenance tools (`foundation_health`, `atom_list`, `atom_reembed`, `atom_history`, and `atom_stats`) are hidden from the default MCP tool catalog. Set `EXPOSE_MAINTENANCE_TOOLS=true` for an administrative client; the HTTP health endpoint remains available independently.
+## Database migrations
 
-The tools include MCP annotations such as `readOnlyHint` and `destructiveHint`, allowing OpenAI clients to filter tools and apply approval policies.
+The schema is now managed by ordered migrations serialized by a PostgreSQL advisory lock. Current schema version: **5**.
 
-## Run with Docker
+- v1: existing core atom/relation/event schema
+- v2: existing OAuth schema
+- v3: additive OAuth namespace grants plus `atom_feedback` and `maintenance_jobs`
+- v4: additive retrieval/embedding/relation indexes
+- v5: maintenance restart hardening and OAuth active-record indexes
+
+No v0.3 migration drops or rewrites the `atoms` table.
+
+With `AUTO_MIGRATE=true`, an existing Foundation MCP v1/v2 database upgrades automatically at startup. A pre-migration Foundation MCP database that already has the known atom columns but lacks migration metadata is conservatively baselined and then upgraded. The older pre-MCP Foundation `atoms_db` format is **not** guessed as the same schema; use the legacy importer described below.
+
+For an explicit migration with an optional `pg_dump` backup:
+
+```bash
+npm run build
+node dist/src/admin.js migrate foundation-before-v03.dump
+```
+
+`pg_dump` must be installed when a backup filename is supplied. If `AUTO_MIGRATE=false`, Foundation refuses to start against an older schema instead of failing later inside a new query.
+
+## Migrating the original Foundation `atoms_db`
+
+The legacy importer reads the old `atoms_db` table and writes through the normal atom validation/deduplication path. Vault/source-sync tables are intentionally ignored.
+
+```bash
+npm run build
+LEGACY_DATABASE_URL=postgresql://old-host/old-foundation \
+DATABASE_URL=postgresql://new-host/foundation \
+LEGACY_NAMESPACE=legacy \
+npm run migrate:legacy
+```
+
+Useful migration controls:
+
+```dotenv
+LEGACY_BATCH_SIZE=100
+LEGACY_DRY_RUN=false
+LEGACY_ATOMIC_BATCH=true
+LEGACY_RESUME_AFTER_ID=
+```
+
+The importer reports the last processed legacy ID, so an interrupted migration can resume with `LEGACY_RESUME_AFTER_ID`. Setting `LEGACY_DRY_RUN=true` validates and counts records without writing them. With embeddings disabled, migration is fast and embeddings can be backfilled later with `atom_reembed`.
+
+## Portable export, import, and backup
+
+Foundation includes a small operator CLI:
+
+```bash
+node dist/src/admin.js diagnostics
+node dist/src/admin.js export foundation.jsonl project:calcite
+node dist/src/admin.js import foundation.jsonl
+node dist/src/admin.js backup foundation.dump
+```
+
+Portable JSONL exports omit vectors and derived search documents. Imports recreate atoms through the public atom logic and rebuild relations using an old-ID to new-ID map, so exact deduplication is safe. `backup` uses PostgreSQL `pg_dump --format=custom` for a complete database backup.
+
+## Docker Compose
+
+Copy the example environment and set a real database password and application credentials:
 
 ```bash
 cp .env.example .env
-# Set different long random FOUNDATION_ADMIN_KEY and FOUNDATION_READ_ONLY_KEY values in .env.
+# Replace POSTGRES_PASSWORD, FOUNDATION_ADMIN_KEY, FOUNDATION_READ_ONLY_KEY,
+# and OAuth values as applicable.
 docker compose up -d --build
-curl http://127.0.0.1:8787/health
+curl http://127.0.0.1:8787/ready
 ```
 
-The MCP endpoint is `http://127.0.0.1:8787/mcp`. For remote deployment, set `ALLOWED_HOSTS` to the public hostname and terminate TLS at a reverse proxy.
+The Compose deployment uses a dedicated application image with PostgreSQL 16 client utilities (for version-matched `pg_dump`) and a separate pgvector PostgreSQL 16 container. PostgreSQL is **not** published to the host. The application container is read-only, drops Linux capabilities, enables `no-new-privileges`, and uses `/tmp` as tmpfs.
 
-## Run as one Apple Container
+Data remains in `./data`; `docker compose down` does not delete it.
 
-The image below contains both PostgreSQL/pgvector and the MCP server. PostgreSQL data lives in a container volume and is initialized on the first start:
+## Single-container deployment
 
-```bash
-container machine start
-container build -t foundation-mcp:local .
-container volume create foundation-mcp-data
-container run -d --name foundation-mcp \
-  --env-file .env \
-  -e HOST=:: \
-  -e DATABASE_URL=postgresql://foundation:foundation@127.0.0.1:5432/foundation \
-  -p 8787:8787 \
-  -v foundation-mcp-data:/var/lib/postgresql/data \
-  foundation-mcp:local
-container logs -f foundation-mcp
-curl http://127.0.0.1:8787/health
-```
+The original all-in-one `Dockerfile` is retained for users who want PostgreSQL and Foundation in one container. Its entrypoint can generate a random PostgreSQL password when none is supplied, and it continues to translate the common Compose hostname `db` to local PostgreSQL for compatibility.
 
-Use a strong `POSTGRES_PASSWORD` and matching `DATABASE_URL` for a new deployment. The entrypoint also rewrites the old Compose hostname `db` to `127.0.0.1` so an existing `.env` can be used safely with the single-container image. Stop it with `container stop foundation-mcp`; do not delete the volume unless the data is intentionally disposable.
+For reproducible deployments, explicitly provide `POSTGRES_PASSWORD`. The single-container database only listens on loopback inside the container.
 
-The default Compose file does not publish PostgreSQL. Database files are stored in the local `./data` directory, which is ignored by Git. `docker compose down` preserves that directory; do not delete it when stopping the stack. Point-in-time Atom exports are stored in `atoms-export-2026-08-05.json` and `atoms-export-2026-08-05-final.json`.
+## Local stdio
 
-## Run locally over stdio
-
-Start PostgreSQL with pgvector, then:
+Start a pgvector-enabled PostgreSQL server and run:
 
 ```bash
 npm install
 npm run build
 MCP_TRANSPORT=stdio \
-DATABASE_URL=postgresql://foundation:foundation@127.0.0.1:5432/foundation \
+DATABASE_URL=postgresql://foundation:password@127.0.0.1:5432/foundation \
+EMBEDDING_PROVIDER=none \
 node dist/src/index.js
 ```
 
-Example client configuration:
-
-```json
-{
-  "mcpServers": {
-    "foundation": {
-      "command": "node",
-      "args": ["/absolute/path/Foundation-MCP/dist/src/index.js"],
-      "env": {
-        "MCP_TRANSPORT": "stdio",
-        "DATABASE_URL": "postgresql://foundation:foundation@127.0.0.1:5432/foundation",
-        "EMBEDDING_PROVIDER": "none"
-      }
-    }
-  }
-}
-```
+No HTTP/OAuth mechanism is required for stdio clients.
 
 ## Embeddings
 
-### Disabled
+`EMBEDDING_PROVIDER=none` is fully supported. Search then uses PostgreSQL full-text retrieval and trigram similarity.
 
-```dotenv
-EMBEDDING_PROVIDER=none
-```
-
-This is a valid operating mode. Search uses PostgreSQL full-text and trigram ranking.
-
-### OpenAI or an OpenAI-compatible endpoint
+For OpenAI or a compatible embeddings endpoint:
 
 ```dotenv
 EMBEDDING_PROVIDER=openai
@@ -134,9 +252,7 @@ OPENAI_API_KEY=...
 OPENAI_BASE_URL=https://api.openai.com/v1
 ```
 
-`OPENAI_BASE_URL` may point to a compatible local or hosted endpoint. Dimension mismatches are rejected before storage.
-
-### Ollama
+For Ollama:
 
 ```dotenv
 EMBEDDING_PROVIDER=ollama
@@ -145,87 +261,41 @@ EMBEDDING_DIMENSIONS=768
 OLLAMA_BASE_URL=http://127.0.0.1:11434
 ```
 
-The database stores unbounded `vector` values while maintaining a dimension-specific HNSW expression index for the configured model. Changing dimensions does not require rebuilding the atoms table, though the new model should be applied with `atom_reembed`.
+The database continues to store unbounded pgvector values while maintaining an HNSW expression index for the active configured dimension. Changing embedding dimensions does not require rebuilding the atom table.
 
-## Search ranking
+## Retrieval evaluation
 
-Hybrid search computes a weighted combination of:
-
-1. cosine similarity for atoms embedded by the active provider/model/dimension
-2. full-text rank and trigram similarity
-3. atom importance
-4. atom confidence
-5. exponential recency decay
-
-Filters run before ranking. Supported filters include namespace, kinds, status, any/all tags, minimum importance/confidence, creation window, and expiration handling. When embeddings are unavailable, semantic and hybrid requests fall back to lexical mode rather than failing.
-
-## Atom design guidance
-
-A useful atom is self-contained and durable:
-
-```json
-{
-  "content": "The Calcite editor hides .DS_Store files in the project tree.",
-  "namespace": "project:calcite",
-  "kind": "fact",
-  "tags": ["file-tree", "macos"],
-  "importance": 0.7,
-  "confidence": 1,
-  "source": {
-    "type": "decision",
-    "conversation_id": "..."
-  }
-}
-```
-
-Avoid storing entire conversations as one atom. Split unrelated statements, keep uncertainty explicit, and preserve provenance. The bundled `skill/foundation-memory/SKILL.md` provides a conservative policy for OpenAI/Codex usage.
-
-## Import atoms from the original Foundation
-
-The importer reads the old `atoms_db` table and writes normalized atoms through the same deduplication path as MCP calls. Vault and source-sync tables are ignored.
+A database-backed benchmark runner measures Recall@K, MRR, nDCG@K, latency, and approximate returned token cost:
 
 ```bash
 npm run build
-LEGACY_DATABASE_URL=postgresql://... \
-DATABASE_URL=postgresql://... \
-LEGACY_NAMESPACE=legacy \
-npm run import:legacy
+cp benchmark/example-retrieval.json benchmark/local.json
+# Replace the placeholder UUID with real expected atom IDs.
+npm run benchmark:retrieval -- benchmark/local.json
 ```
 
-Set `EMBEDDING_PROVIDER=none` for a fast metadata-only migration, then run `atom_reembed` after configuring the desired embedding provider. The importer maps `usercreated` to `fact`, `aicreated` to `observation`, and `imported` to `note`, while preserving old identifiers and parent fields in `source`.
-
-## OpenAI Responses API
-
-`openai-example.mjs` shows a read-only remote MCP connection. In production, expose the server through HTTPS and pass `FOUNDATION_READ_ONLY_KEY` through the MCP `authorization` field unless the client genuinely needs mutation tools. Use `allowed_tools` and approval policies to separate recall from mutation.
-
-A sensible default is to allow these without approval:
-
-- `foundation_health`
-- `atom_search`
-- `atom_context`
-- `atom_get`
-- `atom_list`
-- `atom_neighbors`
-- `atom_stats`
-
-Keep write tools approval-gated, especially `atom_delete` and `atom_merge`.
+`npm run benchmark:context` runs a small deterministic context-planning benchmark without a database. Unit tests also cover MMR diversity, token budgets, namespace authorization, and migration ordering.
 
 ## Security notes
 
-- No API key management endpoints are exposed. `FOUNDATION_ADMIN_KEY` permits every tool; `FOUNDATION_READ_ONLY_KEY` is restricted server-side to retrieval tools. `FOUNDATION_API_KEY` remains a compatibility alias for the admin key.
-- The HTTP server refuses non-local binding without an API key.
-- `ALLOWED_HOSTS` protects the MCP endpoint from Host-header and DNS-rebinding abuse.
-- Hard deletion requires a confirmation string equal to the target UUID.
-- Retrieved atoms are data, not instructions. The bundled skill explicitly treats stored commands as untrusted content.
-- Use TLS at the reverse proxy for remote deployment.
-- Namespace is a logical partition, not a tenant authorization boundary. Run separate instances or add an identity-aware gateway for mutually untrusted users.
+- `FOUNDATION_ADMIN_KEY` retains full MCP write capability. `FOUNDATION_READ_ONLY_KEY` remains server-enforced read-only.
+- Namespace restrictions are optional and default to `*` for backward compatibility.
+- OAuth tokens inherit the registered OAuth client's namespace grants; refreshes preserve them.
+- Host allow-listing remains enabled for remote HTTP deployments.
+- MCP and OAuth endpoints have separate fixed-window request limits.
+- Forwarded client-IP and forwarded-host headers are not trusted directly. Rate limiting uses the transport peer; configure proxy-side rate limiting when Foundation is behind a shared reverse proxy.
+- Hard deletion still requires a confirmation string equal to the target UUID.
+- Retrieved atoms are data, not instructions.
+- Use TLS at the reverse proxy for remote deployments.
+- Foundation does not hand-roll WebAuthn/OIDC cryptography. If external identity or passkeys are required, terminate identity at a vetted reverse proxy/IdP and keep Foundation's existing OAuth/API mechanisms behind it.
 
 ## Development
 
 ```bash
 npm install
-npm run check
+npm run typecheck
+npm test
 npm run build
 ```
 
-The schema is created idempotently at startup when `AUTO_MIGRATE=true`. Migration execution is serialized with a PostgreSQL advisory lock.
+Integration tests run when `TEST_DATABASE_URL` points to a PostgreSQL instance with pgvector. The test suite includes retrieval/context planning, OAuth helpers, namespace authorization, migration safety, transactional atom behavior, supersession, feedback, and atomic/non-atomic bulk creation.

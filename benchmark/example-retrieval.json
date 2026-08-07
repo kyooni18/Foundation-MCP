@@ -1,0 +1,10 @@
+[
+  {
+    "name": "replace-with-a-real-foundation-query",
+    "query": "What decision did we make about the project tree?",
+    "namespace": "project:calcite",
+    "relevantAtomIDs": ["00000000-0000-0000-0000-000000000000"],
+    "mode": "hybrid",
+    "limit": 10
+  }
+]

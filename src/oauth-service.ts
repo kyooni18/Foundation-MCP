@@ -23,7 +23,7 @@ export class OAuthService extends OAuthServiceBase {
 
     return this.database.transaction(async client => {
       const result = await client.query<AuthorizationCodeRow>(
-        `SELECT client_id, redirect_uri, code_challenge, scopes, resource, expires_at, used_at
+        `SELECT client_id, redirect_uri, code_challenge, scopes, resource, expires_at, used_at, allowed_namespaces
          FROM oauth_authorization_codes WHERE code_hash = $1 FOR UPDATE`,
         [sha256(code)]
       );
@@ -32,7 +32,7 @@ export class OAuthService extends OAuthServiceBase {
       if (row.client_id !== clientID || row.redirect_uri !== redirectURI || row.resource !== resource) throw new Error("Authorization code binding mismatch");
       if (!verifyPKCE(verifier, row.code_challenge)) throw new Error("PKCE verification failed");
       await client.query("UPDATE oauth_authorization_codes SET used_at = NOW() WHERE code_hash = $1", [sha256(code)]);
-      return this.issueTokens(clientID, row.scopes as OAuthScope[], resource, client);
+      return this.issueTokens(clientID, row.scopes as OAuthScope[], resource, row.allowed_namespaces, client);
     });
   }
 
@@ -45,7 +45,7 @@ export class OAuthService extends OAuthServiceBase {
 
     return this.database.transaction(async client => {
       const result = await client.query<TokenRow>(
-        `SELECT client_id, scopes, resource, expires_at, revoked_at
+        `SELECT client_id, scopes, resource, expires_at, revoked_at, allowed_namespaces
          FROM oauth_tokens WHERE token_hash = $1 AND token_type = 'refresh' FOR UPDATE`,
         [sha256(refreshToken)]
       );
@@ -55,20 +55,20 @@ export class OAuthService extends OAuthServiceBase {
       const requested = body.scope === undefined ? row.scopes as OAuthScope[] : normalizeScopes(formValue(body.scope));
       if (requested.some(scope => !row.scopes.includes(scope))) throw new Error("Requested scope exceeds original grant");
       await client.query("UPDATE oauth_tokens SET revoked_at = NOW() WHERE token_hash = $1", [sha256(refreshToken)]);
-      return this.issueTokens(clientID, requested, resource, client);
+      return this.issueTokens(clientID, requested, resource, row.allowed_namespaces, client);
     });
   }
 
   async validateAccessToken(token: string): Promise<OAuthPrincipal | null> {
     if (!token) return null;
     const result = await this.database.query<TokenRow>(
-      `SELECT client_id, scopes, resource, expires_at, revoked_at
+      `SELECT client_id, scopes, resource, expires_at, revoked_at, allowed_namespaces
        FROM oauth_tokens WHERE token_hash = $1 AND token_type = 'access'`,
       [sha256(token)]
     );
     const row = result.rows[0];
     if (!row || row.revoked_at || row.expires_at <= new Date() || row.resource !== this.resource) return null;
-    return { clientID: row.client_id, scopes: new Set(row.scopes) };
+    return { clientID: row.client_id, scopes: new Set(row.scopes), allowedNamespaces: row.allowed_namespaces ?? ["*"] };
   }
 
   async revoke(token: string): Promise<void> {
@@ -80,20 +80,21 @@ export class OAuthService extends OAuthServiceBase {
     clientID: string,
     scopes: OAuthScope[],
     resource: string,
+    allowedNamespaces: string[],
     client: { query: (text: string, values?: unknown[]) => Promise<unknown> }
   ): Promise<Record<string, unknown>> {
     const accessToken = randomToken(32);
     const refreshToken = scopes.includes("offline_access") ? randomToken(48) : null;
     await client.query(
-      `INSERT INTO oauth_tokens (token_hash, token_type, client_id, scopes, resource, expires_at)
-       VALUES ($1, 'access', $2, $3, $4, NOW() + ($5 * INTERVAL '1 second'))`,
-      [sha256(accessToken), clientID, scopes, resource, this.config.oauthAccessTokenTTLSeconds]
+      `INSERT INTO oauth_tokens (token_hash, token_type, client_id, scopes, resource, expires_at, allowed_namespaces)
+       VALUES ($1, 'access', $2, $3, $4, NOW() + ($5 * INTERVAL '1 second'), $6)`,
+      [sha256(accessToken), clientID, scopes, resource, this.config.oauthAccessTokenTTLSeconds, allowedNamespaces]
     );
     if (refreshToken) {
       await client.query(
-        `INSERT INTO oauth_tokens (token_hash, token_type, client_id, scopes, resource, expires_at)
-         VALUES ($1, 'refresh', $2, $3, $4, NOW() + ($5 * INTERVAL '1 second'))`,
-        [sha256(refreshToken), clientID, scopes, resource, this.config.oauthRefreshTokenTTLSeconds]
+        `INSERT INTO oauth_tokens (token_hash, token_type, client_id, scopes, resource, expires_at, allowed_namespaces)
+         VALUES ($1, 'refresh', $2, $3, $4, NOW() + ($5 * INTERVAL '1 second'), $6)`,
+        [sha256(refreshToken), clientID, scopes, resource, this.config.oauthRefreshTokenTTLSeconds, allowedNamespaces]
       );
     }
     return {

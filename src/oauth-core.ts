@@ -8,6 +8,7 @@ export interface OAuthClientRow {
   client_id: string;
   client_name: string;
   redirect_uris: string[];
+  allowed_namespaces: string[];
 }
 
 export interface AuthorizationCodeRow {
@@ -18,6 +19,7 @@ export interface AuthorizationCodeRow {
   resource: string;
   expires_at: Date;
   used_at: Date | null;
+  allowed_namespaces: string[];
 }
 
 export interface TokenRow {
@@ -26,11 +28,13 @@ export interface TokenRow {
   resource: string;
   expires_at: Date;
   revoked_at: Date | null;
+  allowed_namespaces: string[];
 }
 
 export interface OAuthPrincipal {
   clientID: string;
   scopes: Set<string>;
+  allowedNamespaces: string[];
 }
 
 export interface AuthorizationRequest {

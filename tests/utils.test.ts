@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { boundedRecord, normalizeContent, normalizeTags, secureTokenEqual, sha256, vectorLiteral } from "../src/utils.js";
+import { boundedRecord, namespaceMatches, normalizeContent, normalizeNamespacePatterns, normalizeTags, secureTokenEqual, sha256, vectorLiteral } from "../src/utils.js";
 
 describe("normalizeContent", () => {
   it("normalizes Unicode, whitespace, and line endings", () => {
@@ -38,5 +38,19 @@ describe("boundedRecord", () => {
 
   it("rejects oversized strings", () => {
     expect(() => boundedRecord({ detail: "x".repeat(1_001) }, "metadata")).toThrow(/metadata/);
+  });
+});
+
+
+describe("namespace patterns", () => {
+  it("supports exact, prefix, and wildcard grants", () => {
+    expect(namespaceMatches("project:calcite", ["project:*"])).toBe(true);
+    expect(namespaceMatches("private", ["project:*"])).toBe(false);
+    expect(namespaceMatches("anything", ["*"])).toBe(true);
+    expect(normalizeNamespacePatterns([" project:* ", "project:*"])).toEqual(["project:*"]);
+  });
+
+  it("rejects ambiguous wildcards", () => {
+    expect(() => normalizeNamespacePatterns(["project:*:private"])).toThrow(/Invalid namespace pattern/);
   });
 });

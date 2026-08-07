@@ -116,3 +116,38 @@ export function safeIndexDimension(value: number): number {
   }
   return value;
 }
+
+export function namespaceMatches(namespace: string, patterns: string[]): boolean {
+  return patterns.some(pattern => {
+    if (pattern === "*") return true;
+    if (pattern.endsWith("*")) return namespace.startsWith(pattern.slice(0, -1));
+    return namespace === pattern;
+  });
+}
+
+export function normalizeNamespacePatterns(values: string[]): string[] {
+  const patterns = [...new Set(values.map(value => value.trim()).filter(Boolean))];
+  if (!patterns.length) throw new Error("At least one namespace pattern is required");
+  for (const pattern of patterns) {
+    if (pattern === "*") continue;
+    const wildcard = pattern.indexOf("*");
+    if (wildcard >= 0 && wildcard !== pattern.length - 1) throw new Error(`Invalid namespace pattern: ${pattern}`);
+    const prefix = wildcard >= 0 ? pattern.slice(0, -1) : pattern;
+    normalizeNamespace(prefix);
+  }
+  return patterns;
+}
+
+export async function mapLimit<T, R>(items: T[], concurrency: number, work: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(Math.max(1, concurrency), Math.max(1, items.length)) }, async () => {
+    while (true) {
+      const index = next++;
+      if (index >= items.length) return;
+      results[index] = await work(items[index]!, index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}

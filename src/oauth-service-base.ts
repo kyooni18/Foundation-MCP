@@ -1,6 +1,6 @@
 import type { Config } from "./config.js";
 import type { Database } from "./db.js";
-import { sha256 } from "./utils.js";
+import { normalizeNamespacePatterns, sha256 } from "./utils.js";
 import {
   OAUTH_SCOPES,
   isAllowedRedirectURI,
@@ -67,10 +67,11 @@ export class OAuthServiceBase {
     const clientName = typeof body.client_name === "string" && body.client_name.trim()
       ? body.client_name.trim().slice(0, 200)
       : "MCP client";
+    const allowedNamespaces = normalizeNamespacePatterns(this.config.oauthDefaultNamespaces);
     await this.database.query(
-      `INSERT INTO oauth_clients (client_id, client_name, redirect_uris, grant_types, response_types, token_endpoint_auth_method)
-       VALUES ($1, $2, $3, $4, $5, 'none')`,
-      [clientID, clientName, redirectURIs, grantTypes, responseTypes]
+      `INSERT INTO oauth_clients (client_id, client_name, redirect_uris, grant_types, response_types, token_endpoint_auth_method, allowed_namespaces)
+       VALUES ($1, $2, $3, $4, $5, 'none', $6)`,
+      [clientID, clientName, redirectURIs, grantTypes, responseTypes, allowedNamespaces]
     );
     return {
       client_id: clientID,
@@ -89,7 +90,7 @@ export class OAuthServiceBase {
     if (input.codeChallengeMethod !== "S256") throw new Error("code_challenge_method must be S256");
     if (input.resource !== this.resource) throw new Error("Invalid resource parameter");
     const result = await this.database.query<OAuthClientRow>(
-      "SELECT client_id, client_name, redirect_uris FROM oauth_clients WHERE client_id = $1",
+      "SELECT client_id, client_name, redirect_uris, allowed_namespaces FROM oauth_clients WHERE client_id = $1",
       [input.clientID]
     );
     const client = result.rows[0];
@@ -100,13 +101,17 @@ export class OAuthServiceBase {
 
   async issueAuthorizationCode(input: AuthorizationRequest, scopes: OAuthScope[]): Promise<string> {
     const code = randomToken(32);
+    const client = await this.database.query<{ allowed_namespaces: string[] }>(
+      "SELECT allowed_namespaces FROM oauth_clients WHERE client_id=$1",
+      [input.clientID]
+    );
+    const allowedNamespaces = client.rows[0]?.allowed_namespaces ?? this.config.oauthDefaultNamespaces;
     await this.database.query(
       `INSERT INTO oauth_authorization_codes
-       (code_hash, client_id, redirect_uri, code_challenge, scopes, resource, expires_at)
-       VALUES ($1, $2, $3, $4, $5, $6, NOW() + INTERVAL '5 minutes')`,
-      [sha256(code), input.clientID, input.redirectURI, input.codeChallenge, scopes, input.resource]
+       (code_hash, client_id, redirect_uri, code_challenge, scopes, resource, expires_at, allowed_namespaces)
+       VALUES ($1, $2, $3, $4, $5, $6, NOW() + INTERVAL '5 minutes', $7)`,
+      [sha256(code), input.clientID, input.redirectURI, input.codeChallenge, scopes, input.resource, allowedNamespaces]
     );
     return code;
   }
-
 }

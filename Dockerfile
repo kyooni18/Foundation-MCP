@@ -27,9 +27,7 @@ RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin app \
 
 ENV POSTGRES_DB=foundation \
     POSTGRES_USER=foundation \
-    POSTGRES_PASSWORD=foundation \
     PGDATA=/var/lib/postgresql/data/pgdata \
-    DATABASE_URL=postgresql://foundation:foundation@127.0.0.1:5432/foundation \
     MCP_TRANSPORT=http \
     HOST=:: \
     PORT=8787
