@@ -100,6 +100,7 @@ export function modelAtom(atom: AtomRow | SearchResult, includeMetadata = false)
     id: atom.id,
     namespace: atom.namespace,
     kind: atom.kind,
+    status: atom.status,
     content: atom.content,
     summary: atom.summary,
     tags: atom.tags
@@ -144,7 +145,6 @@ export class AtomService {
     const duplicate = await this.database.query("SELECT id FROM atoms WHERE namespace=$1 AND content_hash=$2 LIMIT 1", [prepared.namespace, prepared.hash]);
     if (duplicate.rows[0] && prepared.dedupe === "error") throw new Error("An atom with the same normalized content already exists in this namespace");
 
-    // Exact duplicates can be merged/replaced without paying for another embedding request.
     const embedding = duplicate.rows[0] ? null : await this.embeddings.embed(prepared.content);
     return this.database.transaction(client => this.createPrepared(client, prepared, embedding));
   }
@@ -180,8 +180,6 @@ export class AtomService {
       return { results, atomic: true };
     }
 
-    // Preserve per-item partial success while still batching embedding requests.
-    // Invalid inputs never prevent valid siblings from being processed.
     const prepared: Array<PreparedCreate | null> = [];
     const results: Array<Record<string, unknown> | undefined> = new Array(items.length);
     for (let index = 0; index < items.length; index += 1) {
@@ -213,8 +211,6 @@ export class AtomService {
         const batch = await this.embeddings.embedMany(embedEntries.map(entry => entry.item.content));
         embedEntries.forEach((entry, position) => embeddingByIndex.set(entry.index, batch[position] ?? null));
       } catch {
-        // A provider can reject a single malformed/oversized item. Fall back to
-        // per-item embedding so one failure does not change the legacy partial-success semantics.
         for (const entry of embedEntries) {
           try {
             embeddingByIndex.set(entry.index, await this.embeddings.embed(entry.item.content));
@@ -296,16 +292,17 @@ export class AtomService {
           content_hash = $4,
           summary = $5,
           kind = $6,
-          importance = $7,
-          confidence = $8,
-          tags = $9,
-          metadata = $10::jsonb,
-          source = $11::jsonb,
-          expires_at = $12,
-          embedding = CASE WHEN $13::boolean THEN $14::vector ELSE embedding END,
-          embedding_provider = CASE WHEN $13::boolean THEN $15 ELSE embedding_provider END,
-          embedding_model = CASE WHEN $13::boolean THEN $16 ELSE embedding_model END,
-          embedding_dimensions = CASE WHEN $13::boolean THEN $17 ELSE embedding_dimensions END,
+          status = $7,
+          importance = $8,
+          confidence = $9,
+          tags = $10,
+          metadata = $11::jsonb,
+          source = $12::jsonb,
+          expires_at = $13,
+          embedding = CASE WHEN $14::boolean THEN $15::vector ELSE embedding END,
+          embedding_provider = CASE WHEN $14::boolean THEN $16 ELSE embedding_provider END,
+          embedding_model = CASE WHEN $14::boolean THEN $17 ELSE embedding_model END,
+          embedding_dimensions = CASE WHEN $14::boolean THEN $18 ELSE embedding_dimensions END,
           version = version + 1
         WHERE id = $1
         RETURNING *
@@ -313,6 +310,7 @@ export class AtomService {
         [
           input.id, namespace, content, sha256(content), summary,
           input.kind ?? current.kind,
+          input.status ?? current.status,
           clamp(input.importance ?? current.importance),
           clamp(input.confidence ?? current.confidence),
           input.tags === undefined ? current.tags : normalizeTags(input.tags),
@@ -729,9 +727,9 @@ export class AtomService {
         [created.atom.id, oldAtom.id]
       );
       if (input.archiveOld ?? true) {
-        await client.query("UPDATE atoms SET status='archived', version=version+1 WHERE id=$1", [oldAtom.id]);
+        await client.query("UPDATE atoms SET status='superseded', version=version+1 WHERE id=$1", [oldAtom.id]);
       }
-      await this.database.auditWith(client, "supersede", created.atom.id, { oldAtomID: oldAtom.id, archived: input.archiveOld ?? true });
+      await this.database.auditWith(client, "supersede", created.atom.id, { oldAtomID: oldAtom.id, retired: input.archiveOld ?? true });
       const refreshedOld = await client.query("SELECT * FROM atoms WHERE id=$1", [oldAtom.id]);
       return {
         oldAtom: atomFromRow(refreshedOld.rows[0]!),
@@ -876,8 +874,6 @@ export class AtomService {
       params.push(normalizeNamespace(options.namespace));
       conditions.push(`namespace=$${params.length}`);
     }
-    // The lexical branch stays bounded; the semantic branch uses a small KNN
-    // neighborhood for every seed instead of comparing every embedded pair.
     params.push(Math.min(1_500, Math.max(200, limit * 8)));
     const seedLimitRef = `$${params.length}`;
     const candidateLexicalThreshold = Math.max(0.30, lexicalThreshold - 0.35);
@@ -1005,7 +1001,6 @@ export class AtomService {
     });
   }
 
-
   async lifecycleSuggestions(options: { namespace?: string; limit?: number } = {}): Promise<Record<string, unknown>> {
     const params: unknown[] = [];
     const conditions = ["a.status='active'", "(a.expires_at IS NULL OR a.expires_at > NOW())"];
@@ -1078,6 +1073,9 @@ export class AtomService {
       SELECT
         count(*)::int AS total,
         count(*) FILTER (WHERE status='active')::int AS active,
+        count(*) FILTER (WHERE status='resolved')::int AS resolved,
+        count(*) FILTER (WHERE status='superseded')::int AS superseded,
+        count(*) FILTER (WHERE status='deprecated')::int AS deprecated,
         count(*) FILTER (WHERE status='archived')::int AS archived,
         count(*) FILTER (WHERE status='deleted')::int AS deleted,
         count(*) FILTER (WHERE embedding IS NOT NULL)::int AS embedded,
@@ -1163,7 +1161,7 @@ export class AtomService {
         embedding_provider = COALESCE(EXCLUDED.embedding_provider, atoms.embedding_provider),
         embedding_model = COALESCE(EXCLUDED.embedding_model, atoms.embedding_model),
         embedding_dimensions = COALESCE(EXCLUDED.embedding_dimensions, atoms.embedding_dimensions),
-        status = 'active',
+        status = CASE WHEN $17::boolean THEN 'active' ELSE atoms.status END,
         version = atoms.version + 1
       RETURNING *, (xmax = 0) AS was_inserted`,
       [
@@ -1184,9 +1182,6 @@ export class AtomService {
     const relationType = normalizeContent(value).toLocaleLowerCase("und").replace(/\s+/g, "_");
     if (!relationType) throw new Error("relationType must not be empty");
     if (relationType.length > 100) throw new Error("relationType exceeds 100 characters");
-    // Preserve the v0.1 contract for arbitrary relation strings. Standard
-    // relation types are additive conventions, not aliases that rewrite a
-    // caller's existing custom relation names.
     return relationType;
   }
 
@@ -1205,7 +1200,6 @@ export class AtomService {
       metrics.increment("atoms_accessed_total", unique.length);
     } catch {
       metrics.increment("atom_access_update_errors_total");
-      // Retrieval must not fail solely because adaptive bookkeeping failed.
     }
   }
 
