@@ -10,8 +10,17 @@ export const ATOM_KINDS = [
   "observation"
 ] as const;
 
+export const ATOM_STATUSES = [
+  "active",
+  "resolved",
+  "superseded",
+  "deprecated",
+  "archived",
+  "deleted"
+] as const;
+
 export type AtomKind = (typeof ATOM_KINDS)[number];
-export type AtomStatus = "active" | "archived" | "deleted";
+export type AtomStatus = (typeof ATOM_STATUSES)[number];
 export type SearchMode = "hybrid" | "semantic" | "lexical";
 
 export interface AtomRow {
@@ -69,6 +78,7 @@ export interface AtomUpdateInput {
   namespace?: string;
   summary?: string | null;
   kind?: AtomKind;
+  status?: AtomStatus;
   importance?: number;
   confidence?: number;
   tags?: string[];

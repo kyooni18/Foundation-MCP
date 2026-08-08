@@ -5,12 +5,12 @@ import type { AtomService } from "./atom-service.js";
 import type { Database } from "./db.js";
 import type { MaintenanceService } from "./maintenance.js";
 import type { SmartMemoryService } from "./smart-memory.js";
-import { ATOM_KINDS } from "./types.js";
+import { ATOM_KINDS, ATOM_STATUSES } from "./types.js";
 import { jsonText } from "./utils.js";
 
 const metadataSchema = z.record(z.string(), z.unknown());
 const atomKindSchema = z.enum(ATOM_KINDS);
-const atomStatusSchema = z.enum(["active", "archived", "deleted"]);
+const atomStatusSchema = z.enum(ATOM_STATUSES);
 const detailsField = z.boolean().default(false).describe("Include internal fields and metadata; disabled by default for compact output");
 
 const createShape = {
@@ -48,8 +48,6 @@ const searchShape = {
 };
 function result(data: any) {
   return {
-    // Keep one canonical model-visible representation. Returning the same
-    // payload in content and structuredContent doubles prompt-facing bytes.
     content: [{ type: "text" as const, text: JSON.stringify(data) }]
   };
 }
@@ -109,7 +107,7 @@ export function createMcpServer(atoms: AtomService, database: Database, maintena
       "memory_recall",
       {
         title: "Recall Memory",
-        description: "Recall and pack relevant durable memories. This path never invokes the smart LLM.",
+        description: "Recall and pack relevant active durable memories. Resolved, superseded, deprecated, archived, and deleted atoms are excluded by default. This path never invokes the smart LLM.",
         inputSchema: z.object({
           query: z.string().min(1).max(20_000),
           namespace: z.string().optional(),
@@ -126,7 +124,7 @@ export function createMcpServer(atoms: AtomService, database: Database, maintena
       "memory_remember",
       {
         title: "Remember Memory",
-        description: "Store durable memory with deterministic preprocessing first and at most one smart-model call only for ambiguous writes.",
+        description: "Store durable memory with deterministic preprocessing first and at most one smart-model call for ambiguous writes or explicit lifecycle changes such as resolved or obsolete information.",
         inputSchema: z.object({
           text: z.string().min(1).max(100_000),
           namespace: z.string().optional(),
@@ -217,7 +215,7 @@ export function createMcpServer(atoms: AtomService, database: Database, maintena
     "atom_update",
     {
       title: "Update Atom",
-      description: "Patch an atom. Recomputes its hash and embedding when content changes and increments its version.",
+      description: "Patch an atom, including its lifecycle status. Recomputes its hash and embedding when content changes and increments its version.",
       inputSchema: z.object({
         id: z.string().uuid(),
         expectedVersion: z.number().int().min(1).optional().describe("Optimistic concurrency guard"),
@@ -225,6 +223,7 @@ export function createMcpServer(atoms: AtomService, database: Database, maintena
         namespace: z.string().min(1).optional(),
         summary: z.string().max(2_000).nullable().optional(),
         kind: atomKindSchema.optional(),
+        status: atomStatusSchema.optional().describe("Lifecycle status. Recall/search defaults only include active atoms."),
         importance: z.number().min(0).max(1).optional(),
         confidence: z.number().min(0).max(1).optional(),
         tags: z.array(z.string().max(100)).max(100).optional(),
@@ -246,7 +245,7 @@ export function createMcpServer(atoms: AtomService, database: Database, maintena
     "atom_search",
     {
       title: "Search Atoms",
-      description: "Search atoms with hybrid semantic, full-text, trigram, importance, confidence, and recency ranking.",
+      description: "Search atoms with hybrid semantic, full-text, trigram, importance, confidence, and recency ranking. Active atoms are searched by default; pass statuses explicitly for history.",
       inputSchema: z.object({
         ...searchShape,
         includeDetails: z.boolean().default(false).describe("Include internal fields and metadata; disabled by default for compact model output")
@@ -265,7 +264,7 @@ export function createMcpServer(atoms: AtomService, database: Database, maintena
     "atom_find_similar",
     {
       title: "Find Similar Atoms",
-      description: "Find likely duplicates or related atoms using an existing atom as the query.",
+      description: "Find likely duplicates or related active atoms using an existing atom as the query.",
       inputSchema: z.object({
         id: z.string().uuid(),
         limit: z.number().int().min(1).max(50).default(10),
@@ -305,7 +304,7 @@ export function createMcpServer(atoms: AtomService, database: Database, maintena
     "atom_list",
     {
       title: "List Atoms",
-      description: "Browse atoms with namespace, status, kind, and tag filters.",
+      description: "Browse atoms with namespace, lifecycle status, kind, and tag filters.",
       inputSchema: z.object({
         namespace: z.string().optional(),
         statuses: z.array(atomStatusSchema).default(["active"]),
@@ -329,7 +328,7 @@ export function createMcpServer(atoms: AtomService, database: Database, maintena
     "atom_delete",
     {
       title: "Delete or Archive Atom",
-      description: "Archive, soft-delete, or permanently delete an atom. Hard deletion requires confirmation equal to the atom UUID.",
+      description: "Archive, soft-delete, or permanently delete an atom. For completed or obsolete knowledge prefer atom_update with resolved/deprecated status. Hard deletion requires confirmation equal to the atom UUID.",
       inputSchema: z.object({
         id: z.string().uuid(),
         mode: z.enum(["archive", "delete", "hard"]).default("archive"),
@@ -348,7 +347,7 @@ export function createMcpServer(atoms: AtomService, database: Database, maintena
     "atom_restore",
     {
       title: "Restore Atom",
-      description: "Restore an archived or soft-deleted atom to active status.",
+      description: "Restore any non-active atom to active status.",
       inputSchema: z.object({ id: z.string().uuid(), includeDetails: detailsField }),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
     },
@@ -455,11 +454,11 @@ export function createMcpServer(atoms: AtomService, database: Database, maintena
     "atom_supersede",
     {
       title: "Supersede Atom",
-      description: "Create a replacement atom, link it with a supersedes relation, and optionally archive the older atom atomically.",
+      description: "Create a replacement atom, link it with a supersedes relation, and optionally mark the older atom as superseded atomically.",
       inputSchema: z.object({
         oldAtomID: z.string().uuid(),
         replacement: createSchema,
-        archiveOld: z.boolean().default(true),
+        archiveOld: z.boolean().default(true).describe("Compatibility field: when true, the older atom is retired with superseded status"),
         includeDetails: detailsField
       }),
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
@@ -533,7 +532,7 @@ export function createMcpServer(atoms: AtomService, database: Database, maintena
     "atom_history",
     {
       title: "Atom History",
-      description: "Read audit events for one atom, including creation, updates, links, merges, and removal.",
+      description: "Read audit events for one atom, including creation, updates, links, merges, lifecycle changes, and removal.",
       inputSchema: z.object({ id: z.string().uuid(), limit: z.number().int().min(1).max(200).default(50), includeDetails: detailsField }),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
     },
@@ -547,7 +546,7 @@ export function createMcpServer(atoms: AtomService, database: Database, maintena
     "atom_stats",
     {
       title: "Atom Statistics",
-      description: "Return atom counts, embedding coverage, expiration counts, and kind distribution.",
+      description: "Return atom counts by lifecycle status, embedding coverage, expiration counts, and kind distribution.",
       inputSchema: z.object({ namespace: z.string().optional() }),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
     },
@@ -600,7 +599,7 @@ export function createMcpServer(atoms: AtomService, database: Database, maintena
     "foundation://about",
     {
       title: "Foundation MCP Atom Model",
-      description: "Reference for namespaces, atom fields, ranking, and mutation behavior.",
+      description: "Reference for namespaces, atom fields, ranking, lifecycle, and mutation behavior.",
       mimeType: "text/markdown"
     },
     async (uri: URL) => ({
@@ -612,8 +611,10 @@ export function createMcpServer(atoms: AtomService, database: Database, maintena
           "",
           "Atoms are durable, self-contained pieces of knowledge partitioned by namespace.",
           "Search combines semantic similarity, exact/lexical similarity, importance, confidence, and recency.",
-          "Repeated normalized content is deduplicated within a namespace.",
-          "Archive is the preferred reversible removal mode; hard deletion requires the atom UUID as confirmation.",
+          "Repeated normalized content is deduplicated within a namespace without automatically reactivating retired memory.",
+          "Lifecycle statuses are active, resolved, superseded, deprecated, archived, and deleted. Normal recall only uses active atoms.",
+          "Use resolved for completed problems/tasks, superseded when a newer atom replaces an older one, and deprecated for obsolete knowledge.",
+          "Archive is the generic reversible removal mode; hard deletion requires the atom UUID as confirmation.",
           "Relations are directed and typed. Use atom_neighbors to traverse them."
         ].join("\n")
       }]
@@ -649,9 +650,10 @@ export function createMcpServer(atoms: AtomService, database: Database, maintena
             `Use Foundation namespace '${namespace}' conservatively.`,
             "Search before claiming prior knowledge.",
             "Store only durable, self-contained facts, preferences, decisions, constraints, or reusable procedures.",
+            "When information is explicitly fixed, completed, replaced, or obsolete, retire the older atom with the appropriate lifecycle status instead of leaving it active.",
             "Do not store secrets, transient chatter, or speculative inferences as facts.",
             "Preserve provenance in source and uncertainty in confidence.",
-            "Prefer archive over hard deletion, and ask before destructive changes."
+            "Prefer reversible lifecycle changes or archive over hard deletion, and ask before destructive changes."
           ].join("\n")
         }
       }]

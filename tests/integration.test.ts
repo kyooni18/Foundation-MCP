@@ -123,7 +123,46 @@ integration("Foundation MCP PostgreSQL integration", () => {
       archiveOld: true
     });
     expect(replacement.relation.relation_type).toBe("supersedes");
-    expect((await atoms.get(first.atom.id)).status).toBe("archived");
+    expect((await atoms.get(first.atom.id)).status).toBe("superseded");
+  });
+
+  it("keeps retired atoms out of normal recall and does not reactivate them on merge dedupe", async () => {
+    const retired = await atoms.create({
+      content: "The deployment bug is still unresolved.",
+      namespace: "test:lifecycle",
+      kind: "observation"
+    });
+    await atoms.update({ id: retired.atom.id, status: "resolved" });
+
+    const normal = await atoms.search({
+      query: "deployment bug unresolved",
+      namespace: "test:lifecycle",
+      mode: "lexical"
+    });
+    expect(normal.results.some(atom => atom.id === retired.atom.id)).toBe(false);
+
+    const historical = await atoms.search({
+      query: "deployment bug unresolved",
+      namespace: "test:lifecycle",
+      statuses: ["resolved"],
+      mode: "lexical"
+    });
+    expect(historical.results.some(atom => atom.id === retired.atom.id)).toBe(true);
+
+    const duplicate = await atoms.create({
+      content: retired.atom.content,
+      namespace: "test:lifecycle",
+      dedupe: "merge"
+    });
+    expect(duplicate.atom.id).toBe(retired.atom.id);
+    expect(duplicate.atom.status).toBe("resolved");
+
+    const replaced = await atoms.create({
+      content: retired.atom.content,
+      namespace: "test:lifecycle",
+      dedupe: "replace"
+    });
+    expect(replaced.atom.status).toBe("active");
   });
 
   it("supports atomic bulk creation without changing legacy partial-success behavior", async () => {

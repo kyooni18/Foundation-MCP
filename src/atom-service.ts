@@ -100,6 +100,7 @@ export function modelAtom(atom: AtomRow | SearchResult, includeMetadata = false)
     id: atom.id,
     namespace: atom.namespace,
     kind: atom.kind,
+    status: atom.status,
     content: atom.content,
     summary: atom.summary,
     tags: atom.tags
@@ -296,16 +297,17 @@ export class AtomService {
           content_hash = $4,
           summary = $5,
           kind = $6,
-          importance = $7,
-          confidence = $8,
-          tags = $9,
-          metadata = $10::jsonb,
-          source = $11::jsonb,
-          expires_at = $12,
-          embedding = CASE WHEN $13::boolean THEN $14::vector ELSE embedding END,
-          embedding_provider = CASE WHEN $13::boolean THEN $15 ELSE embedding_provider END,
-          embedding_model = CASE WHEN $13::boolean THEN $16 ELSE embedding_model END,
-          embedding_dimensions = CASE WHEN $13::boolean THEN $17 ELSE embedding_dimensions END,
+          status = $7,
+          importance = $8,
+          confidence = $9,
+          tags = $10,
+          metadata = $11::jsonb,
+          source = $12::jsonb,
+          expires_at = $13,
+          embedding = CASE WHEN $14::boolean THEN $15::vector ELSE embedding END,
+          embedding_provider = CASE WHEN $14::boolean THEN $16 ELSE embedding_provider END,
+          embedding_model = CASE WHEN $14::boolean THEN $17 ELSE embedding_model END,
+          embedding_dimensions = CASE WHEN $14::boolean THEN $18 ELSE embedding_dimensions END,
           version = version + 1
         WHERE id = $1
         RETURNING *
@@ -313,6 +315,7 @@ export class AtomService {
         [
           input.id, namespace, content, sha256(content), summary,
           input.kind ?? current.kind,
+          input.status ?? current.status,
           clamp(input.importance ?? current.importance),
           clamp(input.confidence ?? current.confidence),
           input.tags === undefined ? current.tags : normalizeTags(input.tags),
@@ -729,9 +732,9 @@ export class AtomService {
         [created.atom.id, oldAtom.id]
       );
       if (input.archiveOld ?? true) {
-        await client.query("UPDATE atoms SET status='archived', version=version+1 WHERE id=$1", [oldAtom.id]);
+        await client.query("UPDATE atoms SET status='superseded', version=version+1 WHERE id=$1", [oldAtom.id]);
       }
-      await this.database.auditWith(client, "supersede", created.atom.id, { oldAtomID: oldAtom.id, archived: input.archiveOld ?? true });
+      await this.database.auditWith(client, "supersede", created.atom.id, { oldAtomID: oldAtom.id, retired: input.archiveOld ?? true });
       const refreshedOld = await client.query("SELECT * FROM atoms WHERE id=$1", [oldAtom.id]);
       return {
         oldAtom: atomFromRow(refreshedOld.rows[0]!),
@@ -1005,7 +1008,6 @@ export class AtomService {
     });
   }
 
-
   async lifecycleSuggestions(options: { namespace?: string; limit?: number } = {}): Promise<Record<string, unknown>> {
     const params: unknown[] = [];
     const conditions = ["a.status='active'", "(a.expires_at IS NULL OR a.expires_at > NOW())"];
@@ -1054,7 +1056,7 @@ export class AtomService {
       `
       SELECT id, operation, atom_id, details, created_at
       FROM atom_events
-      WHERE atom_id = $1 OR details->>'id' = $1
+      WHERE atom_id = $1::uuid OR details->>'id' = $1::text
       ORDER BY created_at DESC, id DESC
       LIMIT $2
       `,
@@ -1078,6 +1080,9 @@ export class AtomService {
       SELECT
         count(*)::int AS total,
         count(*) FILTER (WHERE status='active')::int AS active,
+        count(*) FILTER (WHERE status='resolved')::int AS resolved,
+        count(*) FILTER (WHERE status='superseded')::int AS superseded,
+        count(*) FILTER (WHERE status='deprecated')::int AS deprecated,
         count(*) FILTER (WHERE status='archived')::int AS archived,
         count(*) FILTER (WHERE status='deleted')::int AS deleted,
         count(*) FILTER (WHERE embedding IS NOT NULL)::int AS embedded,
@@ -1163,7 +1168,7 @@ export class AtomService {
         embedding_provider = COALESCE(EXCLUDED.embedding_provider, atoms.embedding_provider),
         embedding_model = COALESCE(EXCLUDED.embedding_model, atoms.embedding_model),
         embedding_dimensions = COALESCE(EXCLUDED.embedding_dimensions, atoms.embedding_dimensions),
-        status = 'active',
+        status = CASE WHEN $17::boolean THEN 'active' ELSE atoms.status END,
         version = atoms.version + 1
       RETURNING *, (xmax = 0) AS was_inserted`,
       [
