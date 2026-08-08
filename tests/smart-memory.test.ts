@@ -64,20 +64,28 @@ function fakeAtoms(results: SearchResult[] = []) {
     create: vi.fn(async (input: any) => ({
       created: true,
       deduplicated: false,
-      atom: { id: crypto.randomUUID(), ...input }
+      atom: { id: crypto.randomUUID(), status: "active", ...input }
     })),
+    update: vi.fn(async (input: any) => {
+      const current = results.find(item => item.id === input.id);
+      return { ...(current ?? { id: input.id, metadata: {} }), ...input };
+    }),
     supersede: vi.fn(async ({ oldAtomID, replacement }: any) => ({
-      oldAtom: { id: oldAtomID },
-      replacementAtom: { id: crypto.randomUUID(), ...replacement },
-      relation: { id: crypto.randomUUID() }
+      oldAtom: { id: oldAtomID, status: "superseded" },
+      replacementAtom: { id: crypto.randomUUID(), status: "active", ...replacement },
+      relation: { id: crypto.randomUUID(), relation_type: "supersedes" }
     }))
   };
 }
 
-function smartResponse(content: string) {
+function smartResponse(
+  content: string,
+  action: "create" | "skip" | "supersede" | "resolve" | "deprecate" = "create",
+  targetAtomId: string | null = null
+) {
   return new Response(JSON.stringify({
     output_text: JSON.stringify({
-      atoms: [{ content, kind: "fact", importance: 0.6, action: "create", targetAtomId: null }]
+      atoms: [{ content, kind: "fact", importance: 0.6, action, targetAtomId }]
     }),
     usage: { input_tokens: 120, output_tokens: 28 }
   }), { status: 200, headers: { "Content-Type": "application/json" } });
@@ -145,6 +153,47 @@ describe("smart memory cost controls", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(service.stats().calls).toBe(1);
     expect(service.stats().cacheHits).toBe(1);
+  });
+
+  it("retires a resolved problem instead of leaving the stale atom active", async () => {
+    const id = "22222222-2222-4222-8222-222222222222";
+    const old = candidate("Foundation deployment bug is still unresolved", 0.86, id);
+    const text = "Foundation deployment bug has been resolved.";
+    const fetchMock = vi.fn(async () => smartResponse(text, "resolve", id));
+    vi.stubGlobal("fetch", fetchMock);
+    const atoms = fakeAtoms([old]);
+    const service = new SmartMemoryService(config({ smartModelLongInputThreshold: 10_000 }), atoms as any);
+
+    const result = await service.remember({ text });
+
+    expect(result.path).toBe("model");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(atoms.update).toHaveBeenCalledTimes(1);
+    expect(atoms.update).toHaveBeenCalledWith(expect.objectContaining({ id, status: "resolved" }));
+    const update = atoms.update.mock.calls[0]![0];
+    expect(update.metadata.lifecycle).toEqual(expect.objectContaining({
+      state: "resolved",
+      reason: text,
+      managed_by: "memory_remember"
+    }));
+    expect(atoms.create).not.toHaveBeenCalled();
+    expect((result.results as any[])[0]).toEqual(expect.objectContaining({ action: "resolve", atomID: id, status: "resolved" }));
+  });
+
+  it("does not let a lifecycle update take the strong-duplicate skip shortcut", async () => {
+    const id = "33333333-3333-4333-8333-333333333333";
+    const text = "The old workaround is no longer used and is deprecated.";
+    const fetchMock = vi.fn(async () => smartResponse(text, "deprecate", id));
+    vi.stubGlobal("fetch", fetchMock);
+    const atoms = fakeAtoms([candidate(text, 0.99, id)]);
+    const service = new SmartMemoryService(config({ smartModelLongInputThreshold: 10_000 }), atoms as any);
+
+    const result = await service.remember({ text });
+
+    expect(result.path).toBe("model");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(atoms.update).toHaveBeenCalledWith(expect.objectContaining({ id, status: "deprecated" }));
+    expect(atoms.create).not.toHaveBeenCalled();
   });
 
   it("falls back to deterministic storage after the built-in daily call budget is exhausted", async () => {
