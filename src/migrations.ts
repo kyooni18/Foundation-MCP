@@ -4,7 +4,7 @@ export interface Migration {
   statements: (dimensions: number) => string[];
 }
 
-export const LATEST_SCHEMA_VERSION = 5;
+export const LATEST_SCHEMA_VERSION = 6;
 
 export const migrations: Migration[] = [
   {
@@ -207,6 +207,15 @@ export const migrations: Migration[] = [
       `UPDATE maintenance_jobs SET status='failed', error=COALESCE(error, 'Server restarted while job was running'), finished_at=NOW() WHERE status='running'`,
       `CREATE INDEX IF NOT EXISTS oauth_tokens_active_idx ON oauth_tokens (expires_at) WHERE revoked_at IS NULL`,
       `CREATE INDEX IF NOT EXISTS oauth_codes_unused_idx ON oauth_authorization_codes (expires_at) WHERE used_at IS NULL`
+    ]
+  },
+  {
+    version: 6,
+    name: "atom-lifecycle-states",
+    statements: () => [
+      `ALTER TABLE atoms DROP CONSTRAINT IF EXISTS atoms_status_check`,
+      `ALTER TABLE atoms ADD CONSTRAINT atoms_status_check CHECK (status IN ('active','resolved','superseded','deprecated','archived','deleted'))`,
+      `UPDATE atoms a SET status='superseded' FROM atom_relations r WHERE r.to_atom_id=a.id AND r.relation_type='supersedes' AND a.status='archived'`
     ]
   }
 ];
