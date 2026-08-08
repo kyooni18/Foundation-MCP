@@ -145,6 +145,7 @@ export class AtomService {
     const duplicate = await this.database.query("SELECT id FROM atoms WHERE namespace=$1 AND content_hash=$2 LIMIT 1", [prepared.namespace, prepared.hash]);
     if (duplicate.rows[0] && prepared.dedupe === "error") throw new Error("An atom with the same normalized content already exists in this namespace");
 
+    // Exact duplicates can be merged/replaced without paying for another embedding request.
     const embedding = duplicate.rows[0] ? null : await this.embeddings.embed(prepared.content);
     return this.database.transaction(client => this.createPrepared(client, prepared, embedding));
   }
@@ -180,6 +181,8 @@ export class AtomService {
       return { results, atomic: true };
     }
 
+    // Preserve per-item partial success while still batching embedding requests.
+    // Invalid inputs never prevent valid siblings from being processed.
     const prepared: Array<PreparedCreate | null> = [];
     const results: Array<Record<string, unknown> | undefined> = new Array(items.length);
     for (let index = 0; index < items.length; index += 1) {
@@ -211,6 +214,8 @@ export class AtomService {
         const batch = await this.embeddings.embedMany(embedEntries.map(entry => entry.item.content));
         embedEntries.forEach((entry, position) => embeddingByIndex.set(entry.index, batch[position] ?? null));
       } catch {
+        // A provider can reject a single malformed/oversized item. Fall back to
+        // per-item embedding so one failure does not change the legacy partial-success semantics.
         for (const entry of embedEntries) {
           try {
             embeddingByIndex.set(entry.index, await this.embeddings.embed(entry.item.content));
@@ -874,6 +879,8 @@ export class AtomService {
       params.push(normalizeNamespace(options.namespace));
       conditions.push(`namespace=$${params.length}`);
     }
+    // The lexical branch stays bounded; the semantic branch uses a small KNN
+    // neighborhood for every seed instead of comparing every embedded pair.
     params.push(Math.min(1_500, Math.max(200, limit * 8)));
     const seedLimitRef = `$${params.length}`;
     const candidateLexicalThreshold = Math.max(0.30, lexicalThreshold - 0.35);
@@ -1049,7 +1056,7 @@ export class AtomService {
       `
       SELECT id, operation, atom_id, details, created_at
       FROM atom_events
-      WHERE atom_id = $1 OR details->>'id' = $1
+      WHERE atom_id = $1::uuid OR details->>'id' = $1::text
       ORDER BY created_at DESC, id DESC
       LIMIT $2
       `,
@@ -1182,6 +1189,9 @@ export class AtomService {
     const relationType = normalizeContent(value).toLocaleLowerCase("und").replace(/\s+/g, "_");
     if (!relationType) throw new Error("relationType must not be empty");
     if (relationType.length > 100) throw new Error("relationType exceeds 100 characters");
+    // Preserve the v0.1 contract for arbitrary relation strings. Standard
+    // relation types are additive conventions, not aliases that rewrite a
+    // caller's existing custom relation names.
     return relationType;
   }
 
@@ -1200,6 +1210,7 @@ export class AtomService {
       metrics.increment("atoms_accessed_total", unique.length);
     } catch {
       metrics.increment("atom_access_update_errors_total");
+      // Retrieval must not fail solely because adaptive bookkeeping failed.
     }
   }
 
