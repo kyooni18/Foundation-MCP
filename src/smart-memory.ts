@@ -6,7 +6,7 @@ import type { AtomCreateInput, AtomKind, SearchResult } from "./types.js";
 import { normalizeContent, normalizeNamespace, normalizeTags } from "./utils.js";
 
 type SmartMode = "off" | "auto" | "on";
-type DecisionAction = "create" | "skip" | "supersede";
+type DecisionAction = "create" | "skip" | "supersede" | "resolve" | "deprecate";
 
 interface PlannedAtom {
   content: string;
@@ -84,6 +84,11 @@ function overlap(a: string, b: string): number {
   return common / Math.max(aa.size, bb.size);
 }
 
+function looksLikeLifecycleUpdate(raw: string): boolean {
+  const text = normalizeContent(raw).toLocaleLowerCase("und");
+  return /\b(fixed|resolved|solved|completed|done|repaired|obsolete|deprecated|retired|no longer)\b|해결(?:됐|됨|했|완료)|고쳤|고쳐졌|수정(?:됐|됨|완료)|완료(?:됐|됨|했)|끝났|끝남|더 이상.{0,20}(?:아니|없)|폐기(?:됐|됨|했)|사용 중단|구식|무효/.test(text);
+}
+
 function extractResponseText(payload: any): string {
   if (typeof payload?.output_text === "string") return payload.output_text;
   if (Array.isArray(payload?.output)) {
@@ -108,7 +113,7 @@ function parseDecision(raw: string, fallbackContent: string): SmartDecision {
     const content = normalizeContent(String(item?.content ?? ""));
     if (!content || content.length > 100_000) throw new Error("Smart model returned invalid atom content");
     const allowedKinds = new Set<AtomKind>(["fact", "preference", "person", "event", "task", "note", "procedure", "concept", "observation"]);
-    const action: DecisionAction = ["create", "skip", "supersede"].includes(item?.action) ? item.action : "create";
+    const action: DecisionAction = ["create", "skip", "supersede", "resolve", "deprecate"].includes(item?.action) ? item.action : "create";
     return {
       content,
       kind: allowedKinds.has(item?.kind) ? item.kind : classify(content).kind,
@@ -178,15 +183,16 @@ export class SmartMemoryService {
     const namespace = normalizeNamespace(input.namespace ?? "default");
     const pieces = obviousSplit(text);
     const candidates = await this.lexicalCandidates(text, namespace);
+    const lifecycleHint = looksLikeLifecycleUpdate(text);
     const strongDuplicate = candidates.find(candidate => candidate.lexical_score >= this.config.smartModelDuplicateLexicalThreshold && overlap(text, candidate.content) >= 0.9);
 
     let decision: SmartDecision;
     let path: "deterministic" | "cache" | "model";
-    if (strongDuplicate && pieces.length === 1) {
+    if (strongDuplicate && pieces.length === 1 && !lifecycleHint) {
       decision = { atoms: [{ content: text, ...classify(text), action: "skip", targetAtomId: strongDuplicate.id }] };
       path = "deterministic";
       this.avoidDeterministic();
-    } else if (!this.shouldUseModel(text, pieces, candidates)) {
+    } else if (!this.shouldUseModel(text, pieces, candidates, lifecycleHint)) {
       decision = { atoms: pieces.map(content => ({ content, ...classify(content), action: "create" as const })) };
       path = "deterministic";
       this.avoidDeterministic();
@@ -222,6 +228,37 @@ export class SmartMemoryService {
         results.push({ action: "skip", atomID: planned.targetAtomId ?? null, content: planned.content });
         continue;
       }
+
+      if ((planned.action === "resolve" || planned.action === "deprecate") && planned.targetAtomId) {
+        const target = candidates.find(candidate => candidate.id === planned.targetAtomId);
+        if (target) {
+          try {
+            const status = planned.action === "resolve" ? "resolved" : "deprecated";
+            const updated = await this.atoms.update({
+              id: target.id,
+              status,
+              metadata: {
+                ...target.metadata,
+                lifecycle: {
+                  state: status,
+                  reason: planned.content,
+                  changed_at: new Date().toISOString(),
+                  managed_by: "memory_remember"
+                }
+              }
+            });
+            results.push({ action: planned.action, atomID: updated.id, status: updated.status });
+            continue;
+          } catch (error) {
+            logger.warn("Smart lifecycle target could not be retired; storing the new statement instead", {
+              target_atom_id: planned.targetAtomId,
+              action: planned.action,
+              error: error instanceof Error ? error.message : String(error)
+            });
+          }
+        }
+      }
+
       const createInput: AtomCreateInput = {
         content: planned.content,
         namespace,
@@ -254,18 +291,16 @@ export class SmartMemoryService {
     return Boolean(this.config.smartModelAPIKey || !this.config.smartModelBaseURL.startsWith("https://api.openai.com/"));
   }
 
-  private shouldUseModel(text: string, pieces: string[], candidates: SearchResult[]): boolean {
+  private shouldUseModel(text: string, pieces: string[], candidates: SearchResult[], lifecycleHint = false): boolean {
     if (!this.isEnabled()) return false;
     if (!this.budgetAllows(text.length)) {
       this.counters.avoidedBudget += 1;
       metrics.increment("smart_model_avoided_budget_total");
       return false;
     }
-    // Clear list/sentence boundaries are cheaper and more predictable than an LLM splitter.
+    if (lifecycleHint && candidates.length > 0) return true;
     if (pieces.length > 1 && pieces.length <= 8) return candidates.some(candidate => candidate.lexical_score >= this.config.smartModelAmbiguousLexicalThreshold);
-    // Long prose without clear boundaries may genuinely need semantic decomposition.
     if (text.length >= this.config.smartModelLongInputThreshold) return true;
-    // Only ambiguous existing-memory matches justify duplicate/change reasoning.
     return candidates.some(candidate => candidate.lexical_score >= this.config.smartModelAmbiguousLexicalThreshold && candidate.lexical_score < this.config.smartModelDuplicateLexicalThreshold);
   }
 
@@ -321,10 +356,13 @@ export class SmartMemoryService {
       lexical: Number(candidate.lexical_score.toFixed(3))
     }));
     const input = [
-      "Convert durable memory text into at most 8 atomic memories. Return JSON only.",
-      "For each atom choose kind and importance 0..1, plus action=create|skip|supersede.",
-      "Use skip only for genuinely equivalent candidates; supersede only when the new fact clearly replaces a candidate.",
-      "Do not invent facts. Keep the original language. No explanations.",
+      "Convert durable memory text into at most 8 atomic memory decisions. Return JSON only.",
+      "For each item choose kind and importance 0..1, plus action=create|skip|supersede|resolve|deprecate.",
+      "Use skip only for genuinely equivalent candidates.",
+      "Use supersede when a new durable fact replaces an older candidate and the replacement itself should remain active.",
+      "Use resolve only when the text clearly says an existing task, bug, incident, or temporary problem is fixed/completed/no longer outstanding.",
+      "Use deprecate only when an existing candidate is obsolete or invalid without a direct replacement.",
+      "resolve/deprecate/supersede must target one supplied candidate id. Do not invent ids or facts. Keep the original language. No explanations.",
       `namespace=${namespace}`,
       `text=${text.slice(0, this.config.smartModelMaxInputCharacters)}`,
       `candidates=${JSON.stringify(candidatePayload)}`,
@@ -368,7 +406,7 @@ export class SmartMemoryService {
                         content: { type: "string" },
                         kind: { type: "string", enum: ["fact", "preference", "person", "event", "task", "note", "procedure", "concept", "observation"] },
                         importance: { type: "number", minimum: 0, maximum: 1 },
-                        action: { type: "string", enum: ["create", "skip", "supersede"] },
+                        action: { type: "string", enum: ["create", "skip", "supersede", "resolve", "deprecate"] },
                         targetAtomId: { type: ["string", "null"] }
                       },
                       required: ["content", "kind", "importance", "action", "targetAtomId"]
