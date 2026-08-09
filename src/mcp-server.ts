@@ -102,43 +102,147 @@ export function createMcpServer(atoms: AtomService, database: Database, maintena
   );
   const exposeMaintenanceTools = database.config.exposeMaintenanceTools;
 
-  if (smartMemory) {
-    server.registerTool(
-      "memory_recall",
-      {
-        title: "Recall Memory",
-        description: "Recall and pack relevant active durable memories. Resolved, superseded, deprecated, archived, and deleted atoms are excluded by default. This path never invokes the smart LLM.",
-        inputSchema: z.object({
-          query: z.string().min(1).max(20_000),
-          namespace: z.string().optional(),
-          limit: z.number().int().min(1).max(50).default(8),
-          maxCharacters: z.number().int().min(256).max(50_000).default(8_000),
-          maxTokens: z.number().int().min(64).max(20_000).default(2_000)
-        }),
-        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
-      },
-      tool(input => smartMemory.recall(input))
-    );
+  const fullToolProfile = database.config.toolProfile === "full";
 
-    server.registerTool(
-      "memory_remember",
-      {
-        title: "Remember Memory",
-        description: "Store durable memory with deterministic preprocessing first and at most one smart-model call for ambiguous writes or explicit lifecycle changes such as resolved or obsolete information.",
-        inputSchema: z.object({
-          text: z.string().min(1).max(100_000),
-          namespace: z.string().optional(),
-          tags: z.array(z.string().max(100)).max(100).default([]),
-          source: metadataSchema.default({}),
-          store: z.boolean().default(true).describe("Set false to inspect the planned write without mutating memory")
-        }),
-        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
-      },
-      tool(input => smartMemory.remember(input))
-    );
+  if (smartMemory) {
+    if (fullToolProfile) {
+      server.registerTool(
+        "memory_recall",
+        {
+          title: "Recall Memory",
+          description: "Recall and pack relevant active durable memories. Resolved, superseded, deprecated, archived, and deleted atoms are excluded by default. This path never invokes the smart LLM.",
+          inputSchema: z.object({
+            query: z.string().min(1).max(20_000),
+            namespace: z.string().optional(),
+            limit: z.number().int().min(1).max(50).default(8),
+            maxCharacters: z.number().int().min(256).max(50_000).default(8_000),
+            maxTokens: z.number().int().min(64).max(20_000).default(2_000)
+          }),
+          annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
+        },
+        tool(input => smartMemory.recall(input))
+      );
+
+      server.registerTool(
+        "memory_remember",
+        {
+          title: "Remember Memory",
+          description: "Store durable memory with deterministic preprocessing first and at most one smart-model call for ambiguous writes or explicit lifecycle changes such as resolved or obsolete information.",
+          inputSchema: z.object({
+            text: z.string().min(1).max(100_000),
+            namespace: z.string().optional(),
+            tags: z.array(z.string().max(100)).max(100).default([]),
+            source: metadataSchema.default({}),
+            store: z.boolean().default(true).describe("Set false to inspect the planned write without mutating memory")
+          }),
+          annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
+        },
+        tool(input => smartMemory.remember(input))
+      );
+    } else {
+      server.registerTool(
+        "memory_recall",
+        {
+          description: "Recall durable memory.",
+          inputSchema: z.object({
+            query: z.string().min(1).max(20_000),
+            namespace: z.string().optional(),
+            limit: z.number().int().min(1).max(20).default(6)
+          }),
+          annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
+        },
+        tool(input => smartMemory.recall({ ...input, maxCharacters: 4_800, maxTokens: 1_200 }))
+      );
+
+      server.registerTool(
+        "memory_remember",
+        {
+          description: "Store durable memory.",
+          inputSchema: z.object({
+            text: z.string().min(1).max(100_000),
+            namespace: z.string().optional()
+          }),
+          annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
+        },
+        tool(input => smartMemory.remember(input))
+      );
+    }
   }
 
-  registerOptionalTool(server, exposeMaintenanceTools,
+  server.registerTool(
+    "memory_update",
+    {
+      description: "Correct memory by id.",
+      inputSchema: z.object({ id: z.string().uuid(), text: z.string().min(1).max(100_000) }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
+    },
+    tool(async ({ id, text }) => {
+      const atom = await atoms.update({ id, content: text, summary: null });
+      return { id: atom.id, content: atom.content };
+    })
+  );
+
+  server.registerTool(
+    "memory_replace",
+    {
+      description: "Replace outdated memory by id; keep history.",
+      inputSchema: z.object({ id: z.string().uuid(), text: z.string().min(1).max(100_000) }),
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false }
+    },
+    tool(async ({ id, text }) => {
+      const old = await atoms.get(id);
+      if (old.status !== "active") throw new Error("memory_replace requires an active memory");
+      const replaced = await atoms.supersede({
+        oldAtomID: id,
+        replacement: {
+          content: text,
+          namespace: old.namespace,
+          kind: old.kind,
+          importance: old.importance,
+          confidence: old.confidence,
+          tags: old.tags,
+          metadata: old.metadata,
+          source: old.source,
+          expiresAt: old.expires_at?.toISOString() ?? null,
+          dedupe: "merge"
+        },
+        archiveOld: true
+      });
+      return { replaced: id, id: replaced.replacementAtom.id, content: replaced.replacementAtom.content };
+    })
+  );
+
+  server.registerTool(
+    "memory_forget",
+    {
+      description: "Archive memory by id.",
+      inputSchema: z.object({ id: z.string().uuid() }),
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false }
+    },
+    tool(async ({ id }) => {
+      await atoms.remove(id, "archive");
+      return { id, status: "archived" };
+    })
+  );
+
+  server.registerTool(
+    "memory_restore",
+    {
+      description: "Restore archived memory by id.",
+      inputSchema: z.object({ id: z.string().uuid() }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
+    },
+    tool(async ({ id }) => {
+      const current = await atoms.get(id);
+      if (current.status !== "archived" && current.status !== "deleted") {
+        throw new Error("memory_restore only restores archived or deleted memories");
+      }
+      const atom = await atoms.restore(id);
+      return { id: atom.id, content: atom.content };
+    })
+  );
+
+  registerOptionalTool(server, fullToolProfile && exposeMaintenanceTools,
     "foundation_health",
     {
       title: "Foundation Health",
@@ -160,7 +264,7 @@ export function createMcpServer(atoms: AtomService, database: Database, maintena
     })
   );
 
-  server.registerTool(
+  registerOptionalTool(server, fullToolProfile,
     "atom_create",
     {
       title: "Create Atom",
@@ -179,7 +283,7 @@ export function createMcpServer(atoms: AtomService, database: Database, maintena
     })
   );
 
-  server.registerTool(
+  registerOptionalTool(server, fullToolProfile,
     "atom_bulk_create",
     {
       title: "Create Atoms in Bulk",
@@ -197,7 +301,7 @@ export function createMcpServer(atoms: AtomService, database: Database, maintena
     })
   );
 
-  server.registerTool(
+  registerOptionalTool(server, fullToolProfile,
     "atom_get",
     {
       title: "Get Atom",
@@ -211,7 +315,7 @@ export function createMcpServer(atoms: AtomService, database: Database, maintena
     })
   );
 
-  server.registerTool(
+  registerOptionalTool(server, fullToolProfile,
     "atom_update",
     {
       title: "Update Atom",
@@ -241,7 +345,7 @@ export function createMcpServer(atoms: AtomService, database: Database, maintena
     })
   );
 
-  server.registerTool(
+  registerOptionalTool(server, fullToolProfile,
     "atom_search",
     {
       title: "Search Atoms",
@@ -260,7 +364,7 @@ export function createMcpServer(atoms: AtomService, database: Database, maintena
     })
   );
 
-  server.registerTool(
+  registerOptionalTool(server, fullToolProfile,
     "atom_find_similar",
     {
       title: "Find Similar Atoms",
@@ -283,7 +387,7 @@ export function createMcpServer(atoms: AtomService, database: Database, maintena
     })
   );
 
-  server.registerTool(
+  registerOptionalTool(server, fullToolProfile,
     "atom_context",
     {
       title: "Build Memory Context",
@@ -300,7 +404,7 @@ export function createMcpServer(atoms: AtomService, database: Database, maintena
     tool(async input => atoms.context(input))
   );
 
-  registerOptionalTool(server, exposeMaintenanceTools,
+  registerOptionalTool(server, fullToolProfile && exposeMaintenanceTools,
     "atom_list",
     {
       title: "List Atoms",
@@ -324,7 +428,7 @@ export function createMcpServer(atoms: AtomService, database: Database, maintena
     })
   );
 
-  server.registerTool(
+  registerOptionalTool(server, fullToolProfile,
     "atom_delete",
     {
       title: "Delete or Archive Atom",
@@ -343,7 +447,7 @@ export function createMcpServer(atoms: AtomService, database: Database, maintena
     })
   );
 
-  server.registerTool(
+  registerOptionalTool(server, fullToolProfile,
     "atom_restore",
     {
       title: "Restore Atom",
@@ -357,7 +461,7 @@ export function createMcpServer(atoms: AtomService, database: Database, maintena
     })
   );
 
-  server.registerTool(
+  registerOptionalTool(server, fullToolProfile,
     "atom_link",
     {
       title: "Link Atoms",
@@ -379,7 +483,7 @@ export function createMcpServer(atoms: AtomService, database: Database, maintena
     })
   );
 
-  server.registerTool(
+  registerOptionalTool(server, fullToolProfile,
     "atom_unlink",
     {
       title: "Unlink Atoms",
@@ -394,7 +498,7 @@ export function createMcpServer(atoms: AtomService, database: Database, maintena
     tool(async input => atoms.unlink(input))
   );
 
-  server.registerTool(
+  registerOptionalTool(server, fullToolProfile,
     "atom_neighbors",
     {
       title: "Get Atom Neighbors",
@@ -413,7 +517,7 @@ export function createMcpServer(atoms: AtomService, database: Database, maintena
     }))
   );
 
-  server.registerTool(
+  registerOptionalTool(server, fullToolProfile,
     "atom_merge",
     {
       title: "Merge Duplicate Atoms",
@@ -434,7 +538,7 @@ export function createMcpServer(atoms: AtomService, database: Database, maintena
     })
   );
 
-  server.registerTool(
+  registerOptionalTool(server, fullToolProfile,
     "atom_feedback",
     {
       title: "Record Atom Feedback",
@@ -450,7 +554,7 @@ export function createMcpServer(atoms: AtomService, database: Database, maintena
     tool(async input => atoms.feedback(input))
   );
 
-  server.registerTool(
+  registerOptionalTool(server, fullToolProfile,
     "atom_supersede",
     {
       title: "Supersede Atom",
@@ -473,7 +577,7 @@ export function createMcpServer(atoms: AtomService, database: Database, maintena
     })
   );
 
-  registerOptionalTool(server, exposeMaintenanceTools,
+  registerOptionalTool(server, fullToolProfile && exposeMaintenanceTools,
     "atom_consolidate",
     {
       title: "Find and Link Near-Duplicate Atoms",
@@ -493,7 +597,7 @@ export function createMcpServer(atoms: AtomService, database: Database, maintena
     })
   );
 
-  registerOptionalTool(server, exposeMaintenanceTools,
+  registerOptionalTool(server, fullToolProfile && exposeMaintenanceTools,
     "atom_lifecycle_suggestions",
     {
       title: "Atom Lifecycle Suggestions",
@@ -507,7 +611,7 @@ export function createMcpServer(atoms: AtomService, database: Database, maintena
     tool(async input => atoms.lifecycleSuggestions(input))
   );
 
-  registerOptionalTool(server, exposeMaintenanceTools,
+  registerOptionalTool(server, fullToolProfile && exposeMaintenanceTools,
     "atom_reembed",
     {
       title: "Re-embed Atoms",
@@ -528,7 +632,7 @@ export function createMcpServer(atoms: AtomService, database: Database, maintena
     })
   );
 
-  registerOptionalTool(server, exposeMaintenanceTools,
+  registerOptionalTool(server, fullToolProfile && exposeMaintenanceTools,
     "atom_history",
     {
       title: "Atom History",
@@ -542,7 +646,7 @@ export function createMcpServer(atoms: AtomService, database: Database, maintena
     })
   );
 
-  registerOptionalTool(server, exposeMaintenanceTools,
+  registerOptionalTool(server, fullToolProfile && exposeMaintenanceTools,
     "atom_stats",
     {
       title: "Atom Statistics",
@@ -553,7 +657,7 @@ export function createMcpServer(atoms: AtomService, database: Database, maintena
     tool(async ({ namespace }) => atoms.stats(namespace))
   );
 
-  registerOptionalTool(server, exposeMaintenanceTools && Boolean(maintenance),
+  registerOptionalTool(server, fullToolProfile && exposeMaintenanceTools && Boolean(maintenance),
     "foundation_maintenance_run",
     {
       title: "Run Foundation Maintenance",
@@ -566,7 +670,7 @@ export function createMcpServer(atoms: AtomService, database: Database, maintena
     tool(async ({ jobType }) => maintenance!.enqueue(jobType, { requestedBy: "mcp" }))
   );
 
-  registerOptionalTool(server, exposeMaintenanceTools && Boolean(maintenance),
+  registerOptionalTool(server, fullToolProfile && exposeMaintenanceTools && Boolean(maintenance),
     "foundation_maintenance_status",
     {
       title: "Foundation Maintenance Status",
@@ -577,7 +681,7 @@ export function createMcpServer(atoms: AtomService, database: Database, maintena
     tool(async ({ limit }) => maintenance!.status(limit))
   );
 
-  registerOptionalTool(server, exposeMaintenanceTools,
+  registerOptionalTool(server, fullToolProfile && exposeMaintenanceTools,
     "foundation_diagnostics",
     {
       title: "Foundation Diagnostics",
@@ -615,7 +719,7 @@ export function createMcpServer(atoms: AtomService, database: Database, maintena
           "Lifecycle statuses are active, resolved, superseded, deprecated, archived, and deleted. Normal recall only uses active atoms.",
           "Use resolved for completed problems/tasks, superseded when a newer atom replaces an older one, and deprecated for obsolete knowledge.",
           "Archive is the generic reversible removal mode; hard deletion requires the atom UUID as confirmation.",
-          "Relations are directed and typed. Use atom_neighbors to traverse them."
+          fullToolProfile ? "Relations are directed and typed. Use atom_neighbors to traverse them." : "Relations are directed and typed; low-level relation tools are available in the full tool profile."
         ].join("\n")
       }]
     })

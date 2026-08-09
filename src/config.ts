@@ -4,6 +4,7 @@ import type { LogLevel } from "./telemetry.js";
 export type TransportMode = "stdio" | "http";
 export type EmbeddingProviderName = "openai" | "ollama" | "none";
 export type SmartModelMode = "off" | "auto" | "on";
+export type McpToolProfile = "balanced" | "full";
 
 function integer(name: string, fallback: number): number {
   const value = process.env[name];
@@ -109,6 +110,7 @@ export interface Config {
   oauthRefreshTokenTTLSeconds: number;
   oauthDefaultNamespaces: string[];
   exposeMaintenanceTools: boolean;
+  toolProfile: McpToolProfile;
   contextDiversityLambda: number;
   contextRelationExpansion: boolean;
   contextRelationLimit: number;
@@ -207,6 +209,7 @@ export function loadConfig(): Config {
     oauthRefreshTokenTTLSeconds,
     oauthDefaultNamespaces: namespacePatterns("OAUTH_DEFAULT_NAMESPACES"),
     exposeMaintenanceTools: boolean("EXPOSE_MAINTENANCE_TOOLS", false),
+    toolProfile: choice("MCP_TOOL_PROFILE", "balanced", ["balanced", "full"] as const),
     contextDiversityLambda,
     contextRelationExpansion: boolean("CONTEXT_RELATION_EXPANSION", true),
     contextRelationLimit: Math.max(0, Math.min(integer("CONTEXT_RELATION_LIMIT", 2), 10)),

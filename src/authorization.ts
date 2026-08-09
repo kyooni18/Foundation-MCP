@@ -54,7 +54,8 @@ export async function authorizeToolNamespaces(
     assertNamespacesAllowed(namespaces, patterns);
     return;
   }
-  if (["atom_get", "atom_update", "atom_delete", "atom_restore", "atom_find_similar", "atom_history", "atom_feedback"].includes(toolName)) {
+  if (["atom_get", "atom_update", "atom_delete", "atom_restore", "atom_find_similar", "atom_history", "atom_feedback",
+      "memory_update", "memory_replace", "memory_forget", "memory_restore"].includes(toolName)) {
     const id = typeof args.id === "string" ? args.id : typeof args.atomID === "string" ? args.atomID : null;
     if (!id) throw new Error("Unable to determine atom namespace for authorization");
     const namespaces = await atoms.namespacesForIDs([id]);

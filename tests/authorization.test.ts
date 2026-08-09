@@ -22,6 +22,17 @@ describe("namespace authorization", () => {
     }, ["project:*"])).rejects.toThrow(/private/);
   });
 
+  it("applies atom namespace checks to high-level memory mutations", async () => {
+    for (const tool of ["memory_update", "memory_replace", "memory_forget", "memory_restore"]) {
+      await expect(authorizeToolNamespaces(fakeAtoms("private"), tool, {
+        id: "00000000-0000-0000-0000-000000000001"
+      }, ["project:*"])).rejects.toThrow(/private/);
+      await expect(authorizeToolNamespaces(fakeAtoms("project:calcite"), tool, {
+        id: "00000000-0000-0000-0000-000000000001"
+      }, ["project:*"])).resolves.toBeUndefined();
+    }
+  });
+
   it("requires all-namespace authority for global maintenance and diagnostics", async () => {
     for (const tool of ["foundation_health", "foundation_maintenance_run", "foundation_maintenance_status", "foundation_diagnostics"]) {
       await expect(authorizeToolNamespaces(fakeAtoms(), tool, {}, ["project:*"])).rejects.toThrow(/all namespaces/);

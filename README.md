@@ -6,7 +6,9 @@ The core `atoms` table remains the same. The v0.3 database changes are intention
 
 ## Compatibility
 
-Existing MCP tools remain available with their existing names and existing arguments. New behavior is additive:
+`MCP_TOOL_PROFILE` controls the MCP tool surface. The default is `balanced`, which exposes only six compact high-level `memory_*` tools. Set `MCP_TOOL_PROFILE=full` to restore the existing low-level `atom_*` and operator tool surface. Existing `.env` files need no changes because the default is built in.
+
+In `full`, existing low-level tools keep their existing names and arguments:
 
 - `atom_bulk_create` accepts an optional `atomic` flag; the default remains independent per-item success/failure.
 - `atom_context` accepts an optional `maxTokens` budget in addition to the existing character budget.
@@ -15,7 +17,7 @@ Existing MCP tools remain available with their existing names and existing argum
 - `/health` remains available and now aliases the readiness check.
 - OAuth authorization code + PKCE, dynamic client registration, refresh tokens, and revocation remain intact.
 
-New optional tools include `atom_feedback`, `atom_supersede`, `atom_consolidate`, `atom_lifecycle_suggestions`, `foundation_maintenance_run`, `foundation_maintenance_status`, and `foundation_diagnostics`. Low-frequency administrative tools remain hidden unless `EXPOSE_MAINTENANCE_TOOLS=true`.
+Low-frequency administrative tools remain hidden unless both `MCP_TOOL_PROFILE=full` and `EXPOSE_MAINTENANCE_TOOLS=true`. The `balanced` profile never exposes `atom_*`, health, diagnostics, or maintenance tools.
 
 ## What v0.3 improves
 
@@ -110,37 +112,30 @@ HTTP probes are separated without removing the old endpoint:
 
 ## Tools
 
+The default `balanced` profile is intentionally small to reduce model tool-schema tokens and tool-selection ambiguity:
+
 | Tool | Purpose | Mutation |
 |---|---|---|
-| `memory_recall` | Recall and pack memories without invoking the smart LLM | No |
-| `memory_remember` | Deterministic-first durable memory write; at most one smart-model fallback call | Yes |
-| `foundation_health` | Database, schema, embedding, smart-model, and maintenance status | No |
-| `atom_create` | Create or exactly deduplicate one atom | Yes |
-| `atom_bulk_create` | Create up to 100 atoms; optional atomic mode | Yes |
-| `atom_get` | Read an atom by UUID | No |
-| `atom_update` | Patch an atom with optional version guarding | Yes |
-| `atom_search` | Hybrid filtered retrieval | No |
-| `atom_find_similar` | Find related atoms from an existing atom | No |
-| `atom_context` | Diversify and pack bounded model context | No |
-| `atom_list` | Browse atoms | No |
-| `atom_delete` | Archive, soft-delete, or hard-delete | Yes, destructive |
-| `atom_restore` | Restore an atom | Yes |
-| `atom_link` | Upsert a typed relation | Yes |
-| `atom_unlink` | Remove a typed relation | Yes |
-| `atom_neighbors` | Traverse relations | No |
-| `atom_merge` | Merge duplicates and rewire relations | Yes, destructive |
-| `atom_feedback` | Record bounded retrieval usefulness feedback | Yes |
-| `atom_supersede` | Replace and link a changed memory atomically | Yes |
-| `atom_consolidate` | Add conservative near-duplicate suggestions | Yes, non-destructive |
-| `atom_lifecycle_suggestions` | Suggest review/promotion/decay candidates | No |
-| `atom_history` | Read per-atom audit events | No |
-| `atom_reembed` | Backfill or migrate embeddings | Yes |
-| `atom_stats` | Aggregate memory statistics | No |
-| `foundation_maintenance_run` | Queue a bounded maintenance job | Yes |
-| `foundation_maintenance_status` | Read recent job state | No |
-| `foundation_diagnostics` | Read operational diagnostics | No |
+| `memory_recall` | Recall relevant active memory | No |
+| `memory_remember` | Store durable memory | Yes |
+| `memory_update` | Correct one existing memory in place | Yes |
+| `memory_replace` | Replace outdated memory while preserving supersession history | Yes |
+| `memory_forget` | Reversibly archive one memory | Yes |
+| `memory_restore` | Restore a forgotten memory | Yes |
 
-Model-facing responses remain compact by default. Existing `includeDetails` and `includeAtoms` options continue to expose richer records only when requested.
+Balanced schemas are deliberately compact. `memory_update` and `memory_replace` need only an atom ID plus replacement text; `memory_forget` and `memory_restore` need only an atom ID. Internal fields are preserved or resolved server-side instead of being sent through the model. `memory_recall` also uses a bounded server-side context budget.
+
+Set `MCP_TOOL_PROFILE=full` when low-level atom or administrative control is needed. Full mode adds the existing `atom_create`, `atom_bulk_create`, `atom_get`, `atom_update`, `atom_search`, `atom_find_similar`, `atom_context`, `atom_delete`, `atom_restore`, `atom_link`, `atom_unlink`, `atom_neighbors`, `atom_merge`, `atom_feedback`, and `atom_supersede` tools. Tools gated by `EXPOSE_MAINTENANCE_TOOLS` remain gated exactly as before.
+
+Example:
+
+```bash
+# default; no .env change required
+docker compose up -d --build
+
+# temporarily expose the full tool surface
+MCP_TOOL_PROFILE=full docker compose up -d --build
+```
 
 ## Database migrations
 
