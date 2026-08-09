@@ -4,7 +4,7 @@ import { loadConfig } from "./config.js";
 import { Database } from "./db.js";
 import { EmbeddingService } from "./embeddings.js";
 import { MaintenanceService } from "./maintenance.js";
-import { SmartMemoryService } from "./smart-memory.js";
+import { SlotAwareSmartMemoryService } from "./smart-memory-slots.js";
 import { configureTelemetry, logger } from "./telemetry.js";
 import { serveHTTP } from "./transports/http.js";
 import { serveStdio } from "./transports/stdio.js";
@@ -17,7 +17,7 @@ async function main(): Promise<void> {
   const embeddings = new EmbeddingService(config);
   const atoms = new AtomService(database, embeddings);
   const maintenance = new MaintenanceService(config, atoms, database);
-  const smartMemory = new SmartMemoryService(config, atoms);
+  const smartMemory = new SlotAwareSmartMemoryService(config, atoms);
   maintenance.start();
 
   if (config.transport === "http") {
