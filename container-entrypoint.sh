@@ -8,11 +8,15 @@ POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-$(/usr/local/bin/node -e 'console.log(re
 export POSTGRES_PASSWORD
 
 mkdir -p "$PGDATA"
-chown -R postgres:postgres "$PGDATA"
 
 fresh_database=0
 if [[ ! -s "$PGDATA/PG_VERSION" ]]; then
   fresh_database=1
+  # A bind-mounted data directory may not support chown (for example on
+  # Apple Container). A fresh database still needs PostgreSQL ownership, but
+  # an initialized directory already has the permissions it needs and must
+  # not be recursively chowned on every restart.
+  chown -R postgres:postgres "$PGDATA"
   su postgres -s /bin/bash -c "initdb --pgdata='$PGDATA' --auth-local=peer --auth-host=scram-sha-256"
 fi
 
