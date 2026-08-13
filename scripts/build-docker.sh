@@ -6,4 +6,4 @@ repo_dir="$(CDPATH= cd -- "$script_dir/.." && pwd)"
 image="${1:-kyooni18/foundation-mcp:latest}"
 
 cd "$repo_dir"
-BUILDX_GIT_INFO=0 docker build -f Dockerfile.app -t "$image" .
+BUILDX_GIT_INFO=0 docker buildx build --load -f Dockerfile.app -t "$image" .
