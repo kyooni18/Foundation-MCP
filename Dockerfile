@@ -21,8 +21,6 @@ COPY --from=build /app/skill ./skill
 COPY container-entrypoint.sh /usr/local/bin/container-entrypoint.sh
 RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin app \
     && chmod 755 /usr/local/bin/container-entrypoint.sh \
-    && mkdir -p /var/lib/postgresql/data \
-    && chown -R postgres:postgres /var/lib/postgresql/data \
     && chown -R app:app /app
 
 ENV POSTGRES_DB=foundation \
