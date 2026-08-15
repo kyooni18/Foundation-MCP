@@ -247,6 +247,32 @@ OPENAI_API_KEY=...
 OPENAI_BASE_URL=https://api.openai.com/v1
 ```
 
+For Google Gemini embeddings:
+
+```dotenv
+EMBEDDING_PROVIDER=google
+EMBEDDING_MODEL=gemini-embedding-001
+EMBEDDING_DIMENSIONS=1536
+GOOGLE_API_KEY=...
+GOOGLE_BASE_URL=https://generativelanguage.googleapis.com/v1beta
+```
+
+`GEMINI_API_KEY` is also accepted as an alias for `GOOGLE_API_KEY`. Documents use
+Google's `RETRIEVAL_DOCUMENT` task type and search queries use `RETRIEVAL_QUERY`.
+
+For OpenRouter's OpenAI-compatible embeddings API:
+
+```dotenv
+EMBEDDING_PROVIDER=openrouter
+EMBEDDING_MODEL=openai/text-embedding-3-small
+EMBEDDING_DIMENSIONS=1536
+OPENROUTER_API_KEY=...
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+# Optional attribution headers:
+# OPENROUTER_SITE_URL=https://foundation.example.com
+# OPENROUTER_APP_NAME=Foundation MCP
+```
+
 For Ollama:
 
 ```dotenv
@@ -257,6 +283,14 @@ OLLAMA_BASE_URL=http://127.0.0.1:11434
 ```
 
 The database continues to store unbounded pgvector values while maintaining an HNSW expression index for the active configured dimension. Changing embedding dimensions does not require rebuilding the atom table.
+
+Provider requests have a bounded `EMBEDDING_TIMEOUT_MS` (default 30 seconds) and
+retry only transient network failures and HTTP 408/409/425/429/5xx responses.
+`Retry-After` is honored up to 30 seconds. DNS configuration errors, TLS
+certificate errors, authentication failures, invalid JSON, and dimension
+mismatches are returned without retrying. Hybrid searches fall back to lexical
+search when an embedding provider is temporarily unavailable; explicit semantic
+search still fails so its requested guarantee is not silently weakened.
 
 ## Retrieval evaluation
 

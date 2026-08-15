@@ -37,6 +37,8 @@ For the old `atoms_db` format, use `LEGACY_DATABASE_URL` and `npm run migrate:le
 - MMR-style context diversity, query decomposition, relation expansion, token budgets, and summary fallback;
 - adaptive access and explicit feedback signals with intentionally small ranking weights;
 - embedding batching, duplicate suppression, cache, bounded concurrency, retries, and stale-signature re-embedding;
+- Google Gemini and OpenRouter embedding providers with provider-specific request/response handling;
+- bounded embedding network timeouts, transient-error retry classification, `Retry-After` support, and lexical fallback for hybrid searches;
 - transactional atom mutation + audit behavior and opt-in atomic bulk writes;
 - explicit supersession and conservative near-duplicate consolidation suggestions;
 - lifecycle review/promotion/decay suggestions without automatic destructive mutation;
@@ -80,4 +82,3 @@ This revision adds a deterministic-first compatibility layer for the existing sm
 - health/diagnostics expose aggregate call, avoidance, cache, failure, and token counters without exposing atom contents.
 
 The budgets are intentionally in-process and require no schema change. A process restart resets them, so deployments that require a provider-enforced monetary ceiling should also configure a billing/provider hard limit.
-

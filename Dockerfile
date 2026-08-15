@@ -27,7 +27,7 @@ ENV POSTGRES_DB=foundation \
     POSTGRES_USER=foundation \
     PGDATA=/var/lib/postgresql/data/pgdata \
     MCP_TRANSPORT=http \
-    HOST=:: \
+    HOST=0.0.0.0 \
     PORT=8787
 EXPOSE 8787
 VOLUME ["/var/lib/postgresql/data"]

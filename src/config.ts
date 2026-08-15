@@ -2,7 +2,7 @@ import { safeIndexDimension } from "./utils.js";
 import type { LogLevel } from "./telemetry.js";
 
 export type TransportMode = "stdio" | "http";
-export type EmbeddingProviderName = "openai" | "ollama" | "none";
+export type EmbeddingProviderName = "openai" | "ollama" | "google" | "gemini" | "openrouter" | "none";
 export type SmartModelMode = "off" | "auto" | "on";
 export type McpToolProfile = "balanced" | "full";
 
@@ -33,6 +33,21 @@ function boolean(name: string, fallback: boolean): boolean {
 function choice<T extends string>(name: string, fallback: T, choices: readonly T[]): T {
   const value = (process.env[name] ?? fallback) as T;
   if (!choices.includes(value)) throw new Error(`${name} must be one of: ${choices.join(", ")}`);
+  return value;
+}
+
+function serviceURL(name: string, fallback: string): string {
+  const value = (process.env[name] ?? fallback).trim().replace(/\/+$/, "");
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(`${name} must be a valid http(s) URL`);
+  }
+  if (!["http:", "https:"].includes(parsed.protocol)) throw new Error(`${name} must use http or https`);
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new Error(`${name} must not contain credentials, a query, or a fragment`);
+  }
   return value;
 }
 
@@ -95,6 +110,13 @@ export interface Config {
   openAIAPIKey: string | null;
   openAIBaseURL: string;
   ollamaBaseURL: string;
+  googleAPIKey: string | null;
+  googleBaseURL: string;
+  openRouterAPIKey: string | null;
+  openRouterBaseURL: string;
+  openRouterSiteURL: string | null;
+  openRouterAppName: string | null;
+  embeddingTimeoutMs: number;
   embeddingRetryMax: number;
   embeddingCacheSize: number;
   embeddingCacheTTLSeconds: number;
@@ -146,8 +168,15 @@ export interface Config {
 
 export function loadConfig(): Config {
   const transport = choice("MCP_TRANSPORT", "stdio", ["stdio", "http"] as const);
-  const embeddingProvider = choice("EMBEDDING_PROVIDER", "none", ["openai", "ollama", "none"] as const);
+  const configuredEmbeddingProvider = choice("EMBEDDING_PROVIDER", "none", ["openai", "ollama", "google", "gemini", "openrouter", "none"] as const);
+  const embeddingProvider: EmbeddingProviderName = configuredEmbeddingProvider === "gemini" ? "google" : configuredEmbeddingProvider;
   const embeddingDimensions = safeIndexDimension(integer("EMBEDDING_DIMENSIONS", 1536));
+  const openAIAPIKey = process.env.OPENAI_API_KEY?.trim() || null;
+  const googleAPIKey = process.env.GOOGLE_API_KEY?.trim() || process.env.GEMINI_API_KEY?.trim() || null;
+  const openRouterAPIKey = process.env.OPENROUTER_API_KEY?.trim() || null;
+  if (embeddingProvider === "openai" && !openAIAPIKey) throw new Error("OPENAI_API_KEY is required when EMBEDDING_PROVIDER=openai");
+  if (embeddingProvider === "google" && !googleAPIKey) throw new Error("GOOGLE_API_KEY or GEMINI_API_KEY is required when EMBEDDING_PROVIDER=google");
+  if (embeddingProvider === "openrouter" && !openRouterAPIKey) throw new Error("OPENROUTER_API_KEY is required when EMBEDDING_PROVIDER=openrouter");
   const resolvedPublicURL = publicURL(process.env.PUBLIC_BASE_URL);
   const defaultHosts = ["localhost", "127.0.0.1", "::1"];
   if (resolvedPublicURL) defaultHosts.unshift(new URL(resolvedPublicURL).hostname.toLowerCase());
@@ -189,11 +218,26 @@ export function loadConfig(): Config {
     databaseURL: process.env.DATABASE_URL ?? "postgresql://foundation:foundation@127.0.0.1:5432/foundation",
     databasePoolSize: integer("DATABASE_POOL_SIZE", 10),
     embeddingProvider,
-    embeddingModel: process.env.EMBEDDING_MODEL ?? (embeddingProvider === "ollama" ? "nomic-embed-text" : "text-embedding-3-small"),
+    embeddingModel: process.env.EMBEDDING_MODEL ?? (
+      embeddingProvider === "ollama"
+        ? "nomic-embed-text"
+        : embeddingProvider === "google"
+          ? "gemini-embedding-001"
+          : embeddingProvider === "openrouter"
+            ? "openai/text-embedding-3-small"
+            : "text-embedding-3-small"
+    ),
     embeddingDimensions,
-    openAIAPIKey: process.env.OPENAI_API_KEY?.trim() || null,
-    openAIBaseURL: (process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1").replace(/\/$/, ""),
-    ollamaBaseURL: (process.env.OLLAMA_BASE_URL ?? "http://127.0.0.1:11434").replace(/\/$/, ""),
+    openAIAPIKey,
+    openAIBaseURL: serviceURL("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+    ollamaBaseURL: serviceURL("OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
+    googleAPIKey,
+    googleBaseURL: serviceURL("GOOGLE_BASE_URL", "https://generativelanguage.googleapis.com/v1beta"),
+    openRouterAPIKey,
+    openRouterBaseURL: serviceURL("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+    openRouterSiteURL: process.env.OPENROUTER_SITE_URL?.trim() || null,
+    openRouterAppName: process.env.OPENROUTER_APP_NAME?.trim() || null,
+    embeddingTimeoutMs: Math.max(1_000, Math.min(integer("EMBEDDING_TIMEOUT_MS", 30_000), 120_000)),
     embeddingRetryMax: Math.max(0, Math.min(integer("EMBEDDING_RETRY_MAX", 3), 10)),
     embeddingCacheSize: Math.max(0, Math.min(integer("EMBEDDING_CACHE_SIZE", 2_000), 100_000)),
     embeddingCacheTTLSeconds: Math.max(1, integer("EMBEDDING_CACHE_TTL_SECONDS", 3_600)),

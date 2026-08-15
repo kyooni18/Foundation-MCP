@@ -11,7 +11,7 @@ import type {
   SearchResult
 } from "./types.js";
 import { decomposeQuery, diversifyCandidates, packContext, type ContextCandidate } from "./context-planner.js";
-import { metrics } from "./telemetry.js";
+import { logger, metrics } from "./telemetry.js";
 import {
   clamp,
   compactRecord,
@@ -336,7 +336,18 @@ export class AtomService {
     if (!query) throw new Error("query must not be empty");
     if (query.length > 20_000) throw new Error("query exceeds 20000 characters");
     const requestedMode = input.mode ?? "hybrid";
-    const embedding = requestedMode === "lexical" ? null : await this.embeddings.embed(query);
+    let embedding: EmbeddingResult | null = null;
+    if (requestedMode !== "lexical") {
+      try {
+        embedding = await this.embeddings.embed(query, "query");
+      } catch (error) {
+        if (requestedMode === "semantic") throw error;
+        metrics.increment("embedding_search_fallback_total");
+        logger.warn("Embedding search unavailable; falling back to lexical search", {
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
     const effectiveMode = embedding ? requestedMode : "lexical";
     const semanticEnabled = effectiveMode !== "lexical" && embedding !== null;
     const lexicalEnabled = effectiveMode !== "semantic";
